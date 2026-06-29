@@ -27,13 +27,18 @@ async def main(page: ft.Page) -> None:
         status_text.value = message
         status_text.color = ft.Colors.RED_700 if is_error else ft.Colors.GREEN_700
 
-    def handle_file_selection(event: ft.FilePickerResultEvent) -> None:
-        if not event.files:
+    async def open_file_picker(_: ft.ControlEvent) -> None:
+        files = await file_picker.pick_files(
+            allow_multiple=False,
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["csv", "xlsx"],
+        )
+        if not files:
             set_status("No file selected.", is_error=True)
             page.update()
             return
 
-        selected_file = event.files[0]
+        selected_file = files[0]
         if selected_file.path is None:
             set_status("Selected file path is not available.", is_error=True)
             page.update()
@@ -54,12 +59,6 @@ async def main(page: ft.Page) -> None:
         set_status("LaTeX code generated.")
         page.update()
 
-    def open_file_picker(_: ft.ControlEvent) -> None:
-        file_picker.pick_files(
-            allow_multiple=False,
-            allowed_extensions=["csv", "xlsx"],
-        )
-
     async def copy_output(_: ft.ControlEvent) -> None:
         if not output_field.value:
             set_status("There is no LaTeX code to copy.", is_error=True)
@@ -70,8 +69,8 @@ async def main(page: ft.Page) -> None:
         set_status("Copied LaTeX code to clipboard.")
         page.update()
 
-    file_picker = ft.FilePicker(on_result=handle_file_selection)
-    page.overlay.append(file_picker)
+    file_picker = ft.FilePicker()
+    page.services.append(file_picker)
 
     upload_zone = ft.Container(
         content=ft.Column(
@@ -79,7 +78,7 @@ async def main(page: ft.Page) -> None:
                 ft.Icon(ft.Icons.UPLOAD_FILE, size=36),
                 ft.Text("CSV / XLSX"),
                 ft.FilledButton(
-                    text="Select file",
+                    content="Select file",
                     icon=ft.Icons.FOLDER_OPEN,
                     on_click=open_file_picker,
                 ),
@@ -88,7 +87,7 @@ async def main(page: ft.Page) -> None:
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=12,
         ),
-        border=ft.border.all(1, ft.Colors.BLUE_GREY_200),
+        border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
         border_radius=8,
         padding=24,
         on_click=open_file_picker,
@@ -117,7 +116,7 @@ async def main(page: ft.Page) -> None:
                             expand=True,
                         ),
                         ft.FilledButton(
-                            text="Copy",
+                            content="Copy",
                             icon=ft.Icons.CONTENT_COPY,
                             on_click=copy_output,
                         ),
@@ -143,4 +142,4 @@ async def main(page: ft.Page) -> None:
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.run(main)
