@@ -5,6 +5,14 @@ visually reflecting merged cells (colspan/rowspan).  Each non-covered cell
 is an editable TextField.  Supports single-cell and rectangular range
 selection (via an explicit "range mode" toggle).  Merge and split operations
 delegate to TableGrid and invoke a callback so the caller can rebuild.
+
+For grids at or above ``VIRTUALIZE_ROW_THRESHOLD`` rows, viewport
+windowing is activated: only cells whose row span intersects the
+currently visible scroll window (plus an overscan buffer) are built
+as Flet controls.  The full grid height is preserved on the Stack
+container so scrollbar sizing stays correct.  The caller must wire
+the scroll container's ``on_scroll`` to ``GridEditor.handle_scroll``
+to drive re-windowing on scroll.
 """
 
 from __future__ import annotations
@@ -13,27 +21,51 @@ from collections.abc import Callable
 
 import flet as ft
 
+from converter import ConversionOptions
 from table_model import CellAlignment, TableGrid
 
 # -- Layout constants --------------------------------------------------------
 
 CELL_WIDTH = 120
 CELL_HEIGHT = 40
-HEADER_BG = ft.Colors.BLUE_GREY_100
-CELL_BG = ft.Colors.WHITE
-SELECTED_BG = ft.Colors.BLUE_50
-BORDER_COLOR = ft.Colors.BLUE_GREY_300
-SELECTED_BORDER_COLOR = ft.Colors.BLUE_700
+HEADER_BG = ft.Colors.BLUE_GREY_800
+CELL_BG = ft.Colors.BLUE_GREY_900
+SELECTED_BG = ft.Colors.BLUE_900
+BORDER_COLOR = ft.Colors.BLUE_GREY_600
+SELECTED_BORDER_COLOR = ft.Colors.BLUE_300
+TEXT_COLOR = ft.Colors.GREY_100
+CURSOR_COLOR = ft.Colors.BLUE_200
+BOOKTABS_RULE_COLOR = ft.Colors.BLUE_GREY_400
 BORDER_WIDTH = 1
 SELECTED_BORDER_WIDTH = 2
+BOOKTABS_HEAVY_BORDER_WIDTH = 2
 FONT_SIZE = 13
 CELL_PADDING = 4
 MIN_GRID_DIMENSION = 1
+
+_TEXT_ALIGNMENT_MAP: dict[str, ft.TextAlign] = {
+    "l": ft.TextAlign.LEFT,
+    "c": ft.TextAlign.CENTER,
+    "r": ft.TextAlign.RIGHT,
+}
+
+# -- Viewport windowing constants --------------------------------------------
+
+VIRTUALIZE_ROW_THRESHOLD = 50
+"""Row count at or above which viewport windowing activates."""
+
+VIEWPORT_OVERSCAN_ROWS = 5
+"""Extra rows rendered above and below the visible viewport."""
+
+DEFAULT_VIEWPORT_HEIGHT = 800.0
+"""Initial viewport height estimate (pixels) before the first scroll event."""
 
 # -- Callback type aliases ---------------------------------------------------
 
 CellEditCallback = Callable[[int, int, str], None]
 GridChangeCallback = Callable[[], None]
+SelectionChangeCallback = Callable[[int, int], None]
+BeforeEditCallback = Callable[[int, int], None]
 
 
 # -- GridEditor class --------------------------------------------------------
@@ -62,6 +94,14 @@ class GridEditor:
         on_grid_change: Optional callback invoked after a structural
             change (merge or split).  The caller should rebuild the
             grid view and re-render LaTeX output.
+        on_selection_change: Optional callback invoked when the primary
+            selected cell changes (single-click).  Signature:
+            ``(row, col) -> None``.
+        on_before_edit: Optional callback invoked **before** a cell's
+            content is mutated by ``apply_edit``.  Useful for snapshotting
+            pre-edit state (undo coalescing).  Signature:
+            ``(row, col) -> None``.
+        options: Conversion options used to style the editable preview.
     """
 
     def __init__(
@@ -69,16 +109,27 @@ class GridEditor:
         grid: TableGrid,
         on_cell_edit: CellEditCallback | None = None,
         on_grid_change: GridChangeCallback | None = None,
+        on_selection_change: SelectionChangeCallback | None = None,
+        on_before_edit: BeforeEditCallback | None = None,
+        options: ConversionOptions | None = None,
     ) -> None:
         self._grid = grid
         self._on_cell_edit = on_cell_edit
         self._on_grid_change = on_grid_change
+        self._on_selection_change = on_selection_change
+        self._on_before_edit = on_before_edit
+        self._options = options or ConversionOptions()
 
         self._selection_start: tuple[int, int] | None = None
         self._selection_end: tuple[int, int] | None = None
         self._range_mode: bool = False
 
         self._cell_containers: dict[tuple[int, int], ft.Container] = {}
+
+        # Windowing state (large-table optimization)
+        self._stack: ft.Stack | None = None
+        self._windowed: bool = False
+        self._visible_range: tuple[int, int] = (0, 0)
 
     # -- public API ----------------------------------------------------------
 
@@ -87,6 +138,11 @@ class GridEditor:
 
         Returns a ``Container`` wrapping a ``Stack`` of positioned cell
         controls, or a placeholder ``Text`` when the grid is empty.
+
+        For grids at or above ``VIRTUALIZE_ROW_THRESHOLD`` rows, only
+        cells in the initial viewport (plus overscan) are built.  Wire
+        the scroll container's ``on_scroll`` to ``handle_scroll`` to
+        update visible cells as the user scrolls.
         """
         if self._grid.num_rows == 0 or self._grid.num_cols == 0:
             return ft.Text("No data to display.", color=ft.Colors.GREY_500)
@@ -94,20 +150,70 @@ class GridEditor:
         total_width = self._grid.num_cols * CELL_WIDTH
         total_height = self._grid.num_rows * CELL_HEIGHT
         self._cell_containers.clear()
-        cell_controls = self._build_cell_controls()
+        self._windowed = should_use_windowing(self._grid.num_rows)
 
+        if self._windowed:
+            self._visible_range = compute_visible_row_range(
+                self._grid.num_rows,
+                CELL_HEIGHT,
+                0.0,
+                DEFAULT_VIEWPORT_HEIGHT,
+                VIEWPORT_OVERSCAN_ROWS,
+            )
+            cell_controls = self._build_cell_controls_for_range(
+                self._visible_range,
+            )
+        else:
+            cell_controls = self._build_cell_controls()
+
+        self._stack = ft.Stack(controls=cell_controls)
         return ft.Container(
-            content=ft.Stack(controls=cell_controls),
+            content=self._stack,
             width=total_width,
             height=total_height,
         )
 
+    def handle_scroll(self, event: ft.OnScrollEvent) -> bool:
+        """Update the windowed viewport in response to a scroll event.
+
+        Recomputes the visible row range and rebuilds cell controls when
+        the range changes.  The caller should call ``page.update()``
+        when this method returns ``True``.
+
+        Note: editing a cell that scrolls out of the visible window
+        will lose focus.  This is expected for viewport windowing.
+
+        Returns:
+            True if visible controls were rebuilt; False otherwise.
+        """
+        if not self._windowed or self._stack is None:
+            return False
+        new_range = compute_visible_row_range(
+            self._grid.num_rows,
+            CELL_HEIGHT,
+            event.pixels,
+            event.viewport_dimension,
+            VIEWPORT_OVERSCAN_ROWS,
+        )
+        if new_range == self._visible_range:
+            return False
+        self._visible_range = new_range
+        self._cell_containers.clear()
+        self._stack.controls = self._build_cell_controls_for_range(
+            new_range,
+        )
+        self._update_selection_highlight()
+        return True
+
     def apply_edit(self, row: int, col: int, text: str) -> None:
         """Apply a text edit to the grid and invoke the callback.
 
-        Mutates the ``TableGrid`` via ``set_content`` (single source of
-        truth), then invokes *on_cell_edit* if provided.
+        Fires *on_before_edit* **before** mutating the ``TableGrid``
+        (allows the caller to snapshot for undo).  Then mutates via
+        ``set_content`` and invokes *on_cell_edit* if provided.
         """
+        if self._on_before_edit is not None:
+            self._on_before_edit(row, col)
         self._grid.set_content(row, col, text)
         if self._on_cell_edit is not None:
             self._on_cell_edit(row, col, text)
@@ -316,6 +422,38 @@ class GridEditor:
                 controls.append(control)
         return controls
 
+    def _build_cell_controls_for_range(
+        self, row_range: tuple[int, int]
+    ) -> list[ft.Control]:
+        """Create positioned cell controls for the given row range.
+
+        Includes cells whose rowspan straddles the range boundary so
+        that merged cells partially overlapping the viewport render
+        correctly.
+        """
+        first_row, last_row = row_range
+        controls: list[ft.Control] = []
+        for r in range(self._grid.num_rows):
+            if r > last_row:
+                break
+            for c in range(self._grid.num_cols):
+                cell = self._grid.get_cell(r, c)
+                if cell.is_covered:
+                    continue
+                if not cell_visible_in_row_range(r, cell.rowspan, first_row, last_row):
+                    continue
+                control = self._build_single_cell(
+                    content=cell.content,
+                    row=r,
+                    col=c,
+                    colspan=cell.colspan,
+                    rowspan=cell.rowspan,
+                    is_header=r == 0 and self._grid.has_header,
+                )
+                self._cell_containers[(r, c)] = control
+                controls.append(control)
+        return controls
+
     def _build_single_cell(
         self,
         *,
@@ -336,7 +474,8 @@ class GridEditor:
         w = colspan * CELL_WIDTH
         h = rowspan * CELL_HEIGHT
         bg = HEADER_BG if is_header else CELL_BG
-        text_weight = ft.FontWeight.BOLD if is_header else None
+        text_weight = self._cell_text_weight(row, col)
+        text_alignment = self._cell_text_alignment(row, col)
 
         def on_change(e: ft.ControlEvent, r: int = row, c: int = col) -> None:
             self.apply_edit(r, c, e.data)
@@ -354,7 +493,9 @@ class GridEditor:
         text_field = ft.TextField(
             value=content,
             text_size=FONT_SIZE,
-            text_style=ft.TextStyle(weight=text_weight),
+            text_style=ft.TextStyle(color=TEXT_COLOR, weight=text_weight),
+            text_align=text_alignment,
+            cursor_color=CURSOR_COLOR,
             border=ft.InputBorder.NONE,
             content_padding=ft.Padding(CELL_PADDING, 0, CELL_PADDING, 0),
             dense=True,
@@ -369,17 +510,59 @@ class GridEditor:
             width=w,
             height=h,
             bgcolor=bg,
-            border=ft.Border.all(BORDER_WIDTH, BORDER_COLOR),
+            border=self._cell_border(row, rowspan),
             padding=0,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
+
+    def _cell_text_weight(self, row: int, col: int) -> ft.FontWeight | None:
+        """Return the weight produced by the current bold options."""
+        if self._options.bold_first_row and row == 0:
+            return ft.FontWeight.BOLD
+        if self._options.bold_first_column and col == 0 and row != 0:
+            return ft.FontWeight.BOLD
+        return None
+
+    def _cell_text_alignment(self, row: int, col: int) -> ft.TextAlign:
+        """Resolve a per-cell alignment override or the global default."""
+        alignment = self._grid.get_cell(row, col).alignment
+        alignment_letter = (
+            alignment.value if alignment else self._options.text_alignment
+        )
+        return _TEXT_ALIGNMENT_MAP.get(alignment_letter, ft.TextAlign.CENTER)
+
+    def _cell_border(self, row: int, rowspan: int) -> ft.Border | None:
+        """Build the visual border corresponding to the LaTeX border style."""
+        style = self._options.border_style
+        if style == "all":
+            return ft.Border.all(BORDER_WIDTH, BORDER_COLOR)
+        if style == "none":
+            return None
+
+        is_first_row = row == 0
+        is_last_row = row + rowspan >= self._grid.num_rows
+        if style == "booktabs":
+            top_width = BOOKTABS_HEAVY_BORDER_WIDTH if is_first_row else 0
+            bottom_width = (
+                BOOKTABS_HEAVY_BORDER_WIDTH
+                if is_last_row
+                else BORDER_WIDTH
+                if is_first_row
+                else 0
+            )
+            return _horizontal_border(top_width, bottom_width, BOOKTABS_RULE_COLOR)
+
+        top_width = BORDER_WIDTH if is_first_row else 0
+        bottom_width = BORDER_WIDTH if is_first_row or is_last_row else 0
+        return _horizontal_border(top_width, bottom_width, BORDER_COLOR)
 
     # -- private: selection --------------------------------------------------
 
     def _on_cell_click(self, row: int, col: int) -> None:
         """Handle a cell click for selection.
 
-        Normal mode: replaces the selection with a single cell.
+        Normal mode: replaces the selection with a single cell and
+        fires *on_selection_change*.
         Range mode: if a start cell already exists, sets the end cell
         to form a rectangular range; otherwise sets a new start.
         """
@@ -388,6 +571,8 @@ class GridEditor:
         else:
             self._selection_start = (row, col)
             self._selection_end = (row, col)
+            if self._on_selection_change is not None:
+                self._on_selection_change(row, col)
         self._update_selection_highlight()
 
     def _update_selection_highlight(self) -> None:
@@ -405,7 +590,8 @@ class GridEditor:
                 )
             else:
                 container.bgcolor = HEADER_BG if is_header else CELL_BG
-                container.border = ft.Border.all(BORDER_WIDTH, BORDER_COLOR)
+                cell = self._grid.get_cell(r, c)
+                container.border = self._cell_border(r, cell.rowspan)
 
     # -- backward compatibility aliases (C1 tests call these) ----------------
 
@@ -421,6 +607,18 @@ class GridEditor:
 
 
 # -- Module-level helpers ----------------------------------------------------
+
+
+def _horizontal_border(
+    top_width: float,
+    bottom_width: float,
+    color: ft.ColorValue,
+) -> ft.Border:
+    """Create a border containing horizontal rules only."""
+    return ft.Border(
+        top=ft.BorderSide(top_width, color) if top_width else None,
+        bottom=ft.BorderSide(bottom_width, color) if bottom_width else None,
+    )
 
 
 def _cell_overlaps_rect(
@@ -445,6 +643,74 @@ def _cell_overlaps_rect(
     cell_bottom = cell_row + cell.rowspan - 1
     cell_right = cell_col + cell.colspan - 1
     return cell_row <= r1 and cell_bottom >= r0 and cell_col <= c1 and cell_right >= c0
+
+
+def compute_visible_row_range(
+    total_rows: int,
+    row_height: int,
+    viewport_top: float,
+    viewport_height: float,
+    overscan_rows: int,
+) -> tuple[int, int]:
+    """Compute the inclusive range of rows visible in the viewport.
+
+    Pure function for viewport windowing math.  Converts pixel offsets
+    to row indices, adds overscan, and clamps to grid bounds.
+
+    Args:
+        total_rows: Total number of rows in the grid.
+        row_height: Height of a single row in pixels.
+        viewport_top: Vertical scroll offset from the top in pixels.
+        viewport_height: Height of the visible viewport in pixels.
+        overscan_rows: Extra rows to render beyond the viewport edges.
+
+    Returns:
+        ``(first_row, last_row)`` inclusive, clamped to
+        ``[0, total_rows - 1]``.
+    """
+    if total_rows <= 0 or row_height <= 0:
+        return (0, 0)
+    first_row = max(0, int(viewport_top / row_height) - overscan_rows)
+    viewport_bottom = viewport_top + viewport_height
+    last_row = min(
+        total_rows - 1,
+        int(viewport_bottom / row_height) + overscan_rows,
+    )
+    return (first_row, last_row)
+
+
+def cell_visible_in_row_range(
+    cell_row: int,
+    cell_rowspan: int,
+    visible_first: int,
+    visible_last: int,
+) -> bool:
+    """Check if a cell's vertical span intersects the visible row range.
+
+    Args:
+        cell_row: Row index of the cell anchor.
+        cell_rowspan: Number of rows the cell spans.
+        visible_first: First visible row (inclusive).
+        visible_last: Last visible row (inclusive).
+
+    Returns:
+        True if any part of the cell falls within the visible range.
+    """
+    cell_bottom = cell_row + cell_rowspan - 1
+    return cell_bottom >= visible_first and cell_row <= visible_last
+
+
+def should_use_windowing(
+    total_rows: int,
+    threshold: int = VIRTUALIZE_ROW_THRESHOLD,
+) -> bool:
+    """Return True if viewport windowing should be used for this grid.
+
+    Args:
+        total_rows: Number of rows in the grid.
+        threshold: Row count at/above which windowing activates.
+    """
+    return total_rows >= threshold
 
 
 def grid_has_merges(grid: TableGrid | None) -> bool:

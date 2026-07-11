@@ -3,13 +3,19 @@
 import flet as ft
 import pytest
 
+from converter import ConversionOptions
 from grid_converter import grid_to_latex
 from grid_editor import (
     CELL_HEIGHT,
     CELL_WIDTH,
+    DEFAULT_VIEWPORT_HEIGHT,
+    VIRTUALIZE_ROW_THRESHOLD,
     GridEditor,
     build_grid_view,
+    cell_visible_in_row_range,
+    compute_visible_row_range,
     grid_has_merges,
+    should_use_windowing,
 )
 from table_model import Cell, CellAlignment, TableGrid
 
@@ -743,6 +749,118 @@ class TestGridHasMerges:
 
 
 # ---------------------------------------------------------------------------
+# Tests -- on_selection_change callback
+# ---------------------------------------------------------------------------
+
+
+class TestGridEditorSelectionChange:
+    """Tests for the on_selection_change callback."""
+
+    def test_fires_on_single_click(self) -> None:
+        log: list[tuple[int, int]] = []
+        editor = GridEditor(
+            _simple_grid_2x2(),
+            on_selection_change=lambda r, c: log.append((r, c)),
+        )
+        editor.build()
+        editor._on_cell_click(0, 1)
+        assert log == [(0, 1)]
+
+    def test_fires_on_each_normal_click(self) -> None:
+        log: list[tuple[int, int]] = []
+        editor = GridEditor(
+            _simple_grid_2x2(),
+            on_selection_change=lambda r, c: log.append((r, c)),
+        )
+        editor.build()
+        editor._on_cell_click(0, 0)
+        editor._on_cell_click(1, 1)
+        assert log == [(0, 0), (1, 1)]
+
+    def test_does_not_fire_on_range_end_click(self) -> None:
+        """In range mode, extending the end should NOT fire the callback."""
+        log: list[tuple[int, int]] = []
+        editor = GridEditor(
+            _simple_grid_2x2(),
+            on_selection_change=lambda r, c: log.append((r, c)),
+        )
+        editor.build()
+        editor._on_cell_click(0, 0)  # fires
+        editor.range_mode = True
+        editor._on_cell_click(1, 1)  # should NOT fire (range end)
+        assert log == [(0, 0)]
+
+    def test_no_callback_is_safe(self) -> None:
+        """No crash when on_selection_change is None."""
+        editor = GridEditor(_simple_grid_2x2(), on_selection_change=None)
+        editor.build()
+        editor._on_cell_click(0, 0)
+        assert editor.selected_cell == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Tests -- on_before_edit callback
+# ---------------------------------------------------------------------------
+
+
+class TestGridEditorBeforeEdit:
+    """Tests for the on_before_edit callback."""
+
+    def test_fires_before_content_change(self) -> None:
+        """on_before_edit must fire before the grid content is mutated."""
+        grid = _simple_grid_2x2()
+        captured_content: list[str] = []
+
+        def before_edit(row: int, col: int) -> None:
+            # Capture the content BEFORE mutation.
+            captured_content.append(grid.get_cell(row, col).content)
+
+        editor = GridEditor(grid, on_before_edit=before_edit)
+        editor.build()
+        editor.apply_edit(1, 0, "NEW")
+
+        # The captured content should be the ORIGINAL value, not "NEW".
+        assert captured_content == ["1"]
+        assert grid.get_cell(1, 0).content == "NEW"
+
+    def test_no_callback_is_safe(self) -> None:
+        grid = _simple_grid_2x2()
+        editor = GridEditor(grid, on_before_edit=None)
+        editor.build()
+        editor.apply_edit(0, 0, "OK")
+        assert grid.get_cell(0, 0).content == "OK"
+
+
+# ---------------------------------------------------------------------------
+# Tests -- alignment_to_label mapping
+# ---------------------------------------------------------------------------
+
+
+class TestAlignmentToLabel:
+    """Tests for the alignment_to_label helper in grid_toolbar."""
+
+    def test_left(self) -> None:
+        from grid_toolbar import alignment_to_label
+
+        assert alignment_to_label(CellAlignment.LEFT) == "Left"
+
+    def test_center(self) -> None:
+        from grid_toolbar import alignment_to_label
+
+        assert alignment_to_label(CellAlignment.CENTER) == "Center"
+
+    def test_right(self) -> None:
+        from grid_toolbar import alignment_to_label
+
+        assert alignment_to_label(CellAlignment.RIGHT) == "Right"
+
+    def test_none_maps_to_inherit(self) -> None:
+        from grid_toolbar import alignment_to_label
+
+        assert alignment_to_label(None) == "Inherit"
+
+
+# ---------------------------------------------------------------------------
 # Tests -- grid_toolbar module import
 # ---------------------------------------------------------------------------
 
@@ -752,3 +870,356 @@ def test_grid_toolbar_imports() -> None:
     import grid_toolbar
 
     assert hasattr(grid_toolbar, "build_grid_toolbar")
+
+
+def test_grid_cells_use_dark_theme_colors() -> None:
+    """Cell backgrounds and text must remain legible in dark mode."""
+    from grid_editor import CELL_BG, HEADER_BG, TEXT_COLOR
+
+    editor = GridEditor(_simple_grid_2x2())
+    editor.build()
+
+    header = editor._cell_containers[(0, 0)]
+    body = editor._cell_containers[(1, 0)]
+    assert header.bgcolor == HEADER_BG
+    assert body.bgcolor == CELL_BG
+    assert header.content.text_style.color == TEXT_COLOR
+    assert body.content.text_style.color == TEXT_COLOR
+
+
+def test_grid_cells_use_global_text_alignment() -> None:
+    editor = GridEditor(
+        _simple_grid_2x2(),
+        options=ConversionOptions(text_alignment="r"),
+    )
+    editor.build()
+
+    assert editor._cell_containers[(0, 0)].content.text_align == ft.TextAlign.RIGHT
+    assert editor._cell_containers[(1, 1)].content.text_align == ft.TextAlign.RIGHT
+
+
+def test_grid_cell_alignment_overrides_global_alignment() -> None:
+    grid = _simple_grid_2x2()
+    grid.set_alignment(1, 0, CellAlignment.LEFT)
+    editor = GridEditor(
+        grid,
+        options=ConversionOptions(text_alignment="r"),
+    )
+    editor.build()
+
+    assert editor._cell_containers[(1, 0)].content.text_align == ft.TextAlign.LEFT
+    assert editor._cell_containers[(1, 1)].content.text_align == ft.TextAlign.RIGHT
+
+
+def test_grid_cells_reflect_bold_row_and_column_options() -> None:
+    editor = GridEditor(
+        _simple_grid_2x2(),
+        options=ConversionOptions(
+            bold_first_row=True,
+            bold_first_column=True,
+        ),
+    )
+    editor.build()
+
+    assert (
+        editor._cell_containers[(0, 0)].content.text_style.weight == ft.FontWeight.BOLD
+    )
+    assert (
+        editor._cell_containers[(0, 1)].content.text_style.weight == ft.FontWeight.BOLD
+    )
+    assert (
+        editor._cell_containers[(1, 0)].content.text_style.weight == ft.FontWeight.BOLD
+    )
+    assert editor._cell_containers[(1, 1)].content.text_style.weight is None
+
+
+def test_grid_cells_have_no_border_for_none_style() -> None:
+    editor = GridEditor(
+        _simple_grid_2x2(),
+        options=ConversionOptions(border_style="none"),
+    )
+    editor.build()
+
+    assert editor._cell_containers[(0, 0)].border is None
+    assert editor._cell_containers[(1, 0)].border is None
+
+
+def test_grid_cells_have_horizontal_rules_without_vertical_rules() -> None:
+    editor = GridEditor(
+        _simple_grid_2x2(),
+        options=ConversionOptions(border_style="horizontal"),
+    )
+    editor.build()
+
+    header_border = editor._cell_containers[(0, 0)].border
+    body_border = editor._cell_containers[(1, 0)].border
+    assert header_border.top.width == 1
+    assert header_border.bottom.width == 1
+    assert header_border.left.width == 0
+    assert body_border.top is None
+    assert body_border.bottom.width == 1
+
+
+def test_grid_cells_use_heavy_outer_booktabs_rules() -> None:
+    editor = GridEditor(
+        _simple_grid_2x2(),
+        options=ConversionOptions(border_style="booktabs"),
+    )
+    editor.build()
+
+    header_border = editor._cell_containers[(0, 0)].border
+    body_border = editor._cell_containers[(1, 0)].border
+    assert header_border.top.width == 2
+    assert header_border.bottom.width == 1
+    assert header_border.left.width == 0
+    assert body_border.bottom.width == 2
+
+
+def test_grid_toolbar_primary_actions_wrap() -> None:
+    """Primary actions must wrap instead of overflowing into the TeX pane."""
+    from grid_toolbar import build_grid_toolbar
+
+    result = build_grid_toolbar(
+        get_editor=lambda: None,
+        set_status=lambda _message, _is_error: None,
+        page_update=lambda: None,
+    )
+
+    primary_actions = result.toolbar.controls[0]
+    assert primary_actions.wrap is True
+    assert primary_actions.run_spacing == 4
+
+
+# ---------------------------------------------------------------------------
+# Tests -- viewport windowing: should_use_windowing
+# ---------------------------------------------------------------------------
+
+
+class TestShouldUseWindowing:
+    """Tests for the windowing threshold check."""
+
+    def test_below_threshold_returns_false(self) -> None:
+        assert not should_use_windowing(10)
+        assert not should_use_windowing(VIRTUALIZE_ROW_THRESHOLD - 1)
+
+    def test_at_threshold_returns_true(self) -> None:
+        assert should_use_windowing(VIRTUALIZE_ROW_THRESHOLD)
+
+    def test_above_threshold_returns_true(self) -> None:
+        assert should_use_windowing(VIRTUALIZE_ROW_THRESHOLD + 100)
+
+    def test_custom_threshold(self) -> None:
+        assert not should_use_windowing(5, threshold=10)
+        assert should_use_windowing(10, threshold=10)
+        assert should_use_windowing(20, threshold=10)
+
+
+# ---------------------------------------------------------------------------
+# Tests -- viewport windowing: compute_visible_row_range
+# ---------------------------------------------------------------------------
+
+
+class TestComputeVisibleRowRange:
+    """Tests for the viewport row range computation."""
+
+    def test_viewport_at_top(self) -> None:
+        first, last = compute_visible_row_range(100, 40, 0.0, 800.0, 5)
+        assert first == 0
+        # int(800/40) + 5 = 20 + 5 = 25
+        assert last == 25
+
+    def test_viewport_at_middle(self) -> None:
+        first, last = compute_visible_row_range(100, 40, 2000.0, 800.0, 5)
+        # int(2000/40) - 5 = 50 - 5 = 45
+        assert first == 45
+        # int(2800/40) + 5 = 70 + 5 = 75
+        assert last == 75
+
+    def test_viewport_at_bottom_clamps_last(self) -> None:
+        first, last = compute_visible_row_range(100, 40, 3200.0, 800.0, 5)
+        # int(3200/40) - 5 = 80 - 5 = 75
+        assert first == 75
+        # clamped to total_rows - 1
+        assert last == 99
+
+    def test_first_row_clamps_to_zero(self) -> None:
+        first, _last = compute_visible_row_range(100, 40, 100.0, 400.0, 10)
+        # int(100/40) - 10 = 2 - 10 = -8 -> clamped to 0
+        assert first == 0
+
+    def test_small_grid_returns_all(self) -> None:
+        first, last = compute_visible_row_range(5, 40, 0.0, 800.0, 5)
+        assert first == 0
+        assert last == 4
+
+    def test_zero_rows_returns_zero_tuple(self) -> None:
+        result = compute_visible_row_range(0, 40, 0.0, 800.0, 5)
+        assert result == (0, 0)
+
+    def test_zero_overscan(self) -> None:
+        first, last = compute_visible_row_range(100, 40, 400.0, 400.0, 0)
+        # int(400/40) = 10, int(800/40) = 20
+        assert first == 10
+        assert last == 20
+
+
+# ---------------------------------------------------------------------------
+# Tests -- viewport windowing: cell_visible_in_row_range
+# ---------------------------------------------------------------------------
+
+
+class TestCellVisibleInRowRange:
+    """Tests for span-aware cell visibility checks."""
+
+    def test_single_cell_inside_range(self) -> None:
+        assert cell_visible_in_row_range(5, 1, 0, 10)
+
+    def test_single_cell_above_range(self) -> None:
+        assert not cell_visible_in_row_range(2, 1, 5, 10)
+
+    def test_single_cell_below_range(self) -> None:
+        assert not cell_visible_in_row_range(15, 1, 5, 10)
+
+    def test_cell_at_first_boundary(self) -> None:
+        assert cell_visible_in_row_range(5, 1, 5, 10)
+
+    def test_cell_at_last_boundary(self) -> None:
+        assert cell_visible_in_row_range(10, 1, 5, 10)
+
+    def test_merged_cell_straddling_top_boundary(self) -> None:
+        # Cell at row 3 with rowspan 4 (rows 3-6), range 5-10.
+        assert cell_visible_in_row_range(3, 4, 5, 10)
+
+    def test_merged_cell_straddling_bottom_boundary(self) -> None:
+        # Cell at row 9 with rowspan 3 (rows 9-11), range 5-10.
+        assert cell_visible_in_row_range(9, 3, 5, 10)
+
+    def test_merged_cell_entirely_above(self) -> None:
+        # Cell at row 1 with rowspan 2 (rows 1-2), range 5-10.
+        assert not cell_visible_in_row_range(1, 2, 5, 10)
+
+    def test_merged_cell_entirely_below(self) -> None:
+        # Cell at row 12 with rowspan 3 (rows 12-14), range 5-10.
+        assert not cell_visible_in_row_range(12, 3, 5, 10)
+
+    def test_merged_cell_spanning_entire_range(self) -> None:
+        # Cell at row 3 with rowspan 10 (rows 3-12), range 5-10.
+        assert cell_visible_in_row_range(3, 10, 5, 10)
+
+    def test_merged_cell_just_touching_top(self) -> None:
+        # Cell at row 3 with rowspan 3 (rows 3-5), range 5-10.
+        # cell_bottom = 5 >= visible_first = 5 -> True
+        assert cell_visible_in_row_range(3, 3, 5, 10)
+
+    def test_merged_cell_just_missing_top(self) -> None:
+        # Cell at row 3 with rowspan 2 (rows 3-4), range 5-10.
+        # cell_bottom = 4, visible_first = 5 -> 4 >= 5 is False
+        assert not cell_visible_in_row_range(3, 2, 5, 10)
+
+
+# ---------------------------------------------------------------------------
+# Tests -- viewport windowing: GridEditor integration
+# ---------------------------------------------------------------------------
+
+
+class TestGridEditorWindowing:
+    """Tests for windowing behavior in the GridEditor."""
+
+    def test_small_grid_builds_all_controls(self) -> None:
+        """Below threshold: all cells rendered, no windowing."""
+        grid = _simple_grid_2x2()  # 2 rows < threshold
+        editor = GridEditor(grid)
+        result = editor.build()
+        stack = result.content
+        assert len(stack.controls) == 4  # All 4 cells
+
+    def test_large_grid_builds_fewer_controls(self) -> None:
+        """At/above threshold: only visible-window controls built."""
+        num_rows = VIRTUALIZE_ROW_THRESHOLD + 10
+        rows = [[Cell(content=f"r{r}c{c}") for c in range(3)] for r in range(num_rows)]
+        grid = TableGrid(rows=rows, has_header=True)
+        editor = GridEditor(grid)
+        result = editor.build()
+        stack = result.content
+        total_cells = num_rows * 3
+        assert len(stack.controls) < total_cells
+        assert len(stack.controls) > 0
+
+    def test_large_grid_preserves_full_dimensions(self) -> None:
+        """Windowed grid container has full width/height for scrollbar."""
+        num_rows = VIRTUALIZE_ROW_THRESHOLD + 10
+        rows = [[Cell(content=f"r{r}c{c}") for c in range(3)] for r in range(num_rows)]
+        grid = TableGrid(rows=rows, has_header=True)
+        editor = GridEditor(grid)
+        result = editor.build()
+        assert result.width == 3 * CELL_WIDTH
+        assert result.height == num_rows * CELL_HEIGHT
+
+    def test_handle_scroll_noop_for_small_grid(self) -> None:
+        """handle_scroll returns False for non-windowed grids."""
+        grid = _simple_grid_2x2()
+        editor = GridEditor(grid)
+        editor.build()
+        event = ft.OnScrollEvent(
+            name="scroll",
+            control=ft.Column(),
+            event_type=ft.ScrollType.UPDATE,
+            pixels=100.0,
+            min_scroll_extent=0.0,
+            max_scroll_extent=1000.0,
+            viewport_dimension=400.0,
+        )
+        assert not editor.handle_scroll(event)
+
+    def test_handle_scroll_rebuilds_on_range_change(self) -> None:
+        """handle_scroll returns True when the visible range changes."""
+        num_rows = VIRTUALIZE_ROW_THRESHOLD + 40
+        rows = [[Cell(content=f"r{r}c{c}") for c in range(2)] for r in range(num_rows)]
+        grid = TableGrid(rows=rows, has_header=True)
+        editor = GridEditor(grid)
+        editor.build()
+        # Scroll far enough to change the visible range
+        event = ft.OnScrollEvent(
+            name="scroll",
+            control=ft.Column(),
+            event_type=ft.ScrollType.UPDATE,
+            pixels=float(num_rows * CELL_HEIGHT // 2),
+            min_scroll_extent=0.0,
+            max_scroll_extent=float(num_rows * CELL_HEIGHT),
+            viewport_dimension=float(DEFAULT_VIEWPORT_HEIGHT),
+        )
+        result = editor.handle_scroll(event)
+        assert result is True
+        # Controls were rebuilt (different set of cells)
+        assert len(editor._cell_containers) > 0
+
+    def test_handle_scroll_noop_for_same_range(self) -> None:
+        """handle_scroll returns False when range hasn't changed."""
+        num_rows = VIRTUALIZE_ROW_THRESHOLD + 40
+        rows = [[Cell(content=f"r{r}c{c}") for c in range(2)] for r in range(num_rows)]
+        grid = TableGrid(rows=rows, has_header=True)
+        editor = GridEditor(grid)
+        editor.build()
+        # Scroll a tiny amount that stays in the same overscan range
+        event = ft.OnScrollEvent(
+            name="scroll",
+            control=ft.Column(),
+            event_type=ft.ScrollType.UPDATE,
+            pixels=1.0,
+            min_scroll_extent=0.0,
+            max_scroll_extent=float(num_rows * CELL_HEIGHT),
+            viewport_dimension=float(DEFAULT_VIEWPORT_HEIGHT),
+        )
+        assert not editor.handle_scroll(event)
+
+    def test_windowed_grid_includes_straddling_merge(self) -> None:
+        """A merged cell straddling the window boundary is included."""
+        num_rows = VIRTUALIZE_ROW_THRESHOLD + 10
+        rows = [[Cell(content=f"r{r}c{c}") for c in range(2)] for r in range(num_rows)]
+        grid = TableGrid(rows=rows, has_header=True)
+        # Merge rows 0-3 in column 0 (large rowspan at top)
+        grid.merge_cells(0, 0, 4, 1)
+        editor = GridEditor(grid)
+        editor.build()
+        # The merged anchor at (0, 0) should be in the visible cells
+        assert (0, 0) in editor._cell_containers

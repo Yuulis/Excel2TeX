@@ -1,4 +1,4 @@
-"""Grid editor toolbar: merge/split, insert/delete, alignment controls.
+"""Grid editor toolbar: merge/split, insert/delete, alignment, undo/redo.
 
 Encapsulates the grid editing toolbar UI and event handlers so that
 main.py stays focused on page-level layout and state management.
@@ -9,6 +9,7 @@ updates are managed via caller-supplied callbacks.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import flet as ft
 
@@ -20,6 +21,7 @@ from table_model import CellAlignment
 EditorGetter = Callable[[], GridEditor | None]
 StatusSetter = Callable[[str, bool], None]
 PageUpdater = Callable[[], None]
+MutationHook = Callable[[], None]
 
 # -- Alignment label-to-enum mapping -------------------------------------------
 
@@ -30,7 +32,36 @@ _ALIGNMENT_MAP: dict[str, CellAlignment | None] = {
     "Inherit": None,
 }
 
+_REVERSE_ALIGNMENT_MAP: dict[CellAlignment | None, str] = {
+    CellAlignment.LEFT: "Left",
+    CellAlignment.CENTER: "Center",
+    CellAlignment.RIGHT: "Right",
+    None: "Inherit",
+}
+
 _NO_DATA_MSG = "No data loaded. Load a file first."
+
+
+# -- Public helper -------------------------------------------------------------
+
+
+def alignment_to_label(alignment: CellAlignment | None) -> str:
+    """Map a CellAlignment enum value (or None) to a dropdown display label."""
+    return _REVERSE_ALIGNMENT_MAP.get(alignment, "Inherit")
+
+
+# -- Return type ---------------------------------------------------------------
+
+
+@dataclass
+class ToolbarResult:
+    """Return value of ``build_grid_toolbar`` exposing interactive controls."""
+
+    toolbar: ft.Column
+    range_mode_button: ft.OutlinedButton
+    undo_button: ft.OutlinedButton
+    redo_button: ft.OutlinedButton
+    set_alignment_display: Callable[[str], None]
 
 
 # -- Public builder ------------------------------------------------------------
@@ -40,16 +71,27 @@ def build_grid_toolbar(
     get_editor: EditorGetter,
     set_status: StatusSetter,
     page_update: PageUpdater,
-) -> tuple[ft.Column, ft.OutlinedButton]:
+    on_before_mutation: MutationHook | None = None,
+    on_mutation_failed: MutationHook | None = None,
+    on_undo: MutationHook | None = None,
+    on_redo: MutationHook | None = None,
+) -> ToolbarResult:
     """Build the grid editor toolbar with all editing controls.
 
-    Returns ``(toolbar_column, range_mode_button)`` so the caller can
-    reset the range-mode visual when the editor is rebuilt.
+    Returns a ``ToolbarResult`` giving the caller access to controls
+    that need external state updates (range-mode button, undo/redo
+    buttons, alignment display setter).
 
     Args:
         get_editor: Returns the current GridEditor, or None if no data.
         set_status: ``(message, is_error)`` callback for status display.
         page_update: Callback to push Flet page updates.
+        on_before_mutation: Called before each grid mutation to snapshot
+            state for undo.
+        on_mutation_failed: Called when a mutation raises ``ValueError``
+            to discard the most recent snapshot.
+        on_undo: Callback for the Undo button.
+        on_redo: Callback for the Redo button.
     """
 
     # -- shared helper --------------------------------------------------------
@@ -64,10 +106,14 @@ def build_grid_toolbar(
             set_status(_NO_DATA_MSG, True)
             page_update()
             return
+        if on_before_mutation is not None:
+            on_before_mutation()
         try:
             action(editor)
             set_status(success_msg, False)
         except ValueError as err:
+            if on_mutation_failed is not None:
+                on_mutation_failed()
             set_status(str(err), True)
         page_update()
 
@@ -155,6 +201,8 @@ def build_grid_toolbar(
 
     # -- alignment ------------------------------------------------------------
 
+    _programmatic_update: list[bool] = [False]
+
     alignment_dropdown = ft.Dropdown(
         label="Cell align",
         value="Inherit",
@@ -163,7 +211,15 @@ def build_grid_toolbar(
         width=140,
     )
 
+    def set_alignment_display(label: str) -> None:
+        """Set the dropdown value programmatically without triggering handler."""
+        _programmatic_update[0] = True
+        alignment_dropdown.value = label
+        _programmatic_update[0] = False
+
     async def on_alignment_change(_: ft.ControlEvent) -> None:
+        if _programmatic_update[0]:
+            return
         editor = get_editor()
         if editor is None:
             set_status(_NO_DATA_MSG, True)
@@ -171,20 +227,50 @@ def build_grid_toolbar(
             return
         selected = alignment_dropdown.value or "Inherit"
         alignment = _ALIGNMENT_MAP.get(selected)
+        if on_before_mutation is not None:
+            on_before_mutation()
         try:
             editor.set_selected_alignment(alignment)
             display = selected if selected != "Inherit" else "Inherit (global default)"
             set_status(f"Alignment set to {display}.", False)
         except ValueError as err:
+            if on_mutation_failed is not None:
+                on_mutation_failed()
             set_status(str(err), True)
         page_update()
 
     alignment_dropdown.on_select = on_alignment_change
 
+    # -- undo / redo ----------------------------------------------------------
+
+    undo_button = ft.OutlinedButton(
+        content="Undo",
+        icon=ft.Icons.UNDO,
+        disabled=True,
+    )
+    redo_button = ft.OutlinedButton(
+        content="Redo",
+        icon=ft.Icons.REDO,
+        disabled=True,
+    )
+
+    async def on_undo_click(_: ft.ControlEvent) -> None:
+        if on_undo is not None:
+            on_undo()
+
+    async def on_redo_click(_: ft.ControlEvent) -> None:
+        if on_redo is not None:
+            on_redo()
+
+    undo_button.on_click = on_undo_click
+    redo_button.on_click = on_redo_click
+
     # -- build toolbar layout -------------------------------------------------
 
     merge_split_row = ft.Row(
         controls=[
+            undo_button,
+            redo_button,
             range_mode_button,
             ft.OutlinedButton(
                 content="Merge cells",
@@ -199,6 +285,8 @@ def build_grid_toolbar(
             alignment_dropdown,
         ],
         spacing=8,
+        wrap=True,
+        run_spacing=4,
     )
 
     insert_delete_row = ft.Row(
@@ -240,4 +328,10 @@ def build_grid_toolbar(
         spacing=6,
     )
 
-    return toolbar, range_mode_button
+    return ToolbarResult(
+        toolbar=toolbar,
+        range_mode_button=range_mode_button,
+        undo_button=undo_button,
+        redo_button=redo_button,
+        set_alignment_display=set_alignment_display,
+    )
