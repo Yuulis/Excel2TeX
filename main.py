@@ -3,12 +3,16 @@ import copy
 import flet as ft
 
 from converter import ConversionOptions, dataframe_to_latex, read_table_file
+from grid_converter import grid_to_latex
+from grid_editor import GridEditor, grid_has_merges
+from grid_toolbar import build_grid_toolbar
 from preprocessing import (
     apply_text_case,
     drop_duplicate_rows,
     drop_empty_rows_and_columns,
     transpose_dataframe,
 )
+from table_model import dataframe_to_grid
 
 
 async def main(page: ft.Page) -> None:
@@ -22,6 +26,9 @@ async def main(page: ft.Page) -> None:
     state: dict[str, object] = {
         "dataframe": None,
         "original_dataframe": None,
+        "grid": None,
+        "original_grid": None,
+        "editor": None,
     }
 
     # --- shared widgets ---
@@ -37,6 +44,12 @@ async def main(page: ft.Page) -> None:
         border_radius=6,
         hint_text="Generated LaTeX will appear here.",
     )
+    grid_preview_content = ft.Container(
+        content=ft.Text("No data loaded.", color=ft.Colors.GREY_500),
+    )
+
+    # --- Grid toolbar (built later via grid_toolbar module) ---
+    range_mode_button = None
 
     # --- Additional Info controls ---
 
@@ -119,11 +132,82 @@ async def main(page: ft.Page) -> None:
         )
 
     def render_output() -> None:
+        grid = state["grid"]
+        options = _build_options()
+        if grid is not None:
+            output_field.value = grid_to_latex(grid, options)
+            return
         dataframe = state["dataframe"]
         if dataframe is None:
             return
-        options = _build_options()
         output_field.value = dataframe_to_latex(dataframe, options)
+
+    def _on_cell_edit(row: int, col: int, text: str) -> None:  # noqa: ARG001
+        """Handle a cell content edit from the grid editor.
+
+        The GridEditor has already mutated the TableGrid via set_content,
+        so we only need to re-render the TeX output and push the update.
+        """
+        render_output()
+        page.update()
+
+    def _on_grid_change() -> None:
+        """Called after a structural grid change (merge/split).
+
+        Rebuilds the grid preview and re-renders the LaTeX output.
+        Does NOT call page.update -- the caller handler is responsible.
+        """
+        _refresh_grid_view()
+        render_output()
+
+    def _refresh_grid_view() -> None:
+        """Rebuild the grid preview from the current grid state."""
+        grid = state["grid"]
+        if grid is None:
+            grid_preview_content.content = ft.Text(
+                "No data loaded.", color=ft.Colors.GREY_500
+            )
+            state["editor"] = None
+            return
+        editor = GridEditor(
+            grid, on_cell_edit=_on_cell_edit, on_grid_change=_on_grid_change
+        )
+        state["editor"] = editor
+        grid_preview_content.content = editor.build()
+        # Reset range mode visuals (new editor starts with range_mode=False).
+        if range_mode_button is not None:
+            range_mode_button.style = None
+
+    # --- preprocessing guard ---
+
+    def _grid_has_merges() -> bool:
+        """Return True if the current grid has any merged cells."""
+        return grid_has_merges(state["grid"])
+
+    _MERGE_GUARD_MSG = (
+        "Preprocessing is disabled while merged cells exist. "
+        "Reset or split merges first."
+    )
+
+    def _apply_preprocessing(
+        operation: object,
+        message: str,
+    ) -> None:
+        """Apply a DataFrame preprocessing operation with merge guard."""
+        if state["dataframe"] is None:
+            set_status("No data loaded. Load a file first.", is_error=True)
+            page.update()
+            return
+        if _grid_has_merges():
+            set_status(_MERGE_GUARD_MSG, is_error=True)
+            page.update()
+            return
+        state["dataframe"] = operation(state["dataframe"])
+        state["grid"] = dataframe_to_grid(state["dataframe"])
+        _refresh_grid_view()
+        render_output()
+        set_status(message)
+        page.update()
 
     # --- event handlers ---
 
@@ -152,11 +236,18 @@ async def main(page: ft.Page) -> None:
             dataframe = read_table_file(selected_file.path)
             state["original_dataframe"] = dataframe
             state["dataframe"] = dataframe.copy()
+            grid = dataframe_to_grid(dataframe)
+            state["original_grid"] = copy.deepcopy(grid)
+            state["grid"] = grid
+            _refresh_grid_view()
             render_output()
         except Exception as error:
             output_field.value = ""
             state["dataframe"] = None
             state["original_dataframe"] = None
+            state["grid"] = None
+            state["original_grid"] = None
+            _refresh_grid_view()
             selected_file_text.value = selected_file.name
             set_status(f"Could not convert file: {error}", is_error=True)
             page.update()
@@ -216,64 +307,32 @@ async def main(page: ft.Page) -> None:
     # --- preprocessing handlers ---
 
     async def on_transpose(_: ft.ControlEvent) -> None:
-        if state["dataframe"] is None:
-            set_status("No data loaded. Load a file first.", is_error=True)
-            page.update()
-            return
-        state["dataframe"] = transpose_dataframe(state["dataframe"])
-        render_output()
-        set_status("Transposed data.")
-        page.update()
+        _apply_preprocessing(transpose_dataframe, "Transposed data.")
 
     async def on_uppercase(_: ft.ControlEvent) -> None:
-        if state["dataframe"] is None:
-            set_status("No data loaded. Load a file first.", is_error=True)
-            page.update()
-            return
-        state["dataframe"] = apply_text_case(state["dataframe"], "upper")
-        render_output()
-        set_status("Applied UPPERCASE.")
-        page.update()
+        _apply_preprocessing(
+            lambda df: apply_text_case(df, "upper"), "Applied UPPERCASE."
+        )
 
     async def on_lowercase(_: ft.ControlEvent) -> None:
-        if state["dataframe"] is None:
-            set_status("No data loaded. Load a file first.", is_error=True)
-            page.update()
-            return
-        state["dataframe"] = apply_text_case(state["dataframe"], "lower")
-        render_output()
-        set_status("Applied lowercase.")
-        page.update()
+        _apply_preprocessing(
+            lambda df: apply_text_case(df, "lower"), "Applied lowercase."
+        )
 
     async def on_capitalize(_: ft.ControlEvent) -> None:
-        if state["dataframe"] is None:
-            set_status("No data loaded. Load a file first.", is_error=True)
-            page.update()
-            return
-        state["dataframe"] = apply_text_case(state["dataframe"], "capitalize")
-        render_output()
-        set_status("Applied Capitalize.")
-        page.update()
+        _apply_preprocessing(
+            lambda df: apply_text_case(df, "capitalize"),
+            "Applied Capitalize.",
+        )
 
     async def on_drop_empty(_: ft.ControlEvent) -> None:
-        if state["dataframe"] is None:
-            set_status("No data loaded. Load a file first.", is_error=True)
-            page.update()
-            return
-        state["dataframe"] = drop_empty_rows_and_columns(state["dataframe"])
-        render_output()
-        set_status("Dropped empty rows and columns.")
-        page.update()
+        _apply_preprocessing(
+            drop_empty_rows_and_columns,
+            "Dropped empty rows and columns.",
+        )
 
     async def on_drop_duplicates(_: ft.ControlEvent) -> None:
-        if state["dataframe"] is None:
-            set_status("No data loaded. Load a file first.", is_error=True)
-            page.update()
-            return
-        state["dataframe"] = drop_duplicate_rows(state["dataframe"])
-        render_output()
-        set_status("Dropped duplicate rows.")
-        page.update()
+        _apply_preprocessing(drop_duplicate_rows, "Dropped duplicate rows.")
 
     async def on_reset(_: ft.ControlEvent) -> None:
         if state["original_dataframe"] is None:
@@ -281,6 +340,8 @@ async def main(page: ft.Page) -> None:
             page.update()
             return
         state["dataframe"] = copy.deepcopy(state["original_dataframe"])
+        state["grid"] = copy.deepcopy(state["original_grid"])
+        _refresh_grid_view()
         render_output()
         set_status("Reset to original data.")
         page.update()
@@ -364,6 +425,40 @@ async def main(page: ft.Page) -> None:
         padding=16,
     )
 
+    grid_preview_max_height = 250
+
+    grid_toolbar, range_mode_button = build_grid_toolbar(
+        get_editor=lambda: state.get("editor"),
+        set_status=set_status,
+        page_update=page.update,
+    )
+
+    grid_preview_panel = ft.Container(
+        content=ft.Column(
+            controls=[
+                ft.Text(
+                    "Table Preview",
+                    theme_style=ft.TextThemeStyle.TITLE_SMALL,
+                ),
+                grid_toolbar,
+                ft.Column(
+                    controls=[
+                        ft.Row(
+                            controls=[grid_preview_content],
+                            scroll=ft.ScrollMode.AUTO,
+                        ),
+                    ],
+                    scroll=ft.ScrollMode.AUTO,
+                    height=grid_preview_max_height,
+                ),
+            ],
+            spacing=12,
+        ),
+        border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
+        border_radius=8,
+        padding=16,
+    )
+
     additional_info_panel = ft.Container(
         content=ft.Column(
             controls=[
@@ -416,6 +511,7 @@ async def main(page: ft.Page) -> None:
             controls=[
                 ft.Text("Input", theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
                 data_source_panel,
+                grid_preview_panel,
                 additional_info_panel,
                 structure_type_panel,
                 style_design_panel,
