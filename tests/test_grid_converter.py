@@ -390,6 +390,25 @@ def test_grid_to_latex_with_tabularx_uses_textwidth() -> None:
     assert r"\end{tabularx}" in latex
 
 
+def test_grid_to_latex_with_scale_factor_wraps_table_grid() -> None:
+    grid = _simple_grid_2x2()
+    options = ConversionOptions(scale_factor=0.75)
+
+    latex = grid_to_latex(grid, options)
+
+    assert r"\scalebox{0.75}{%" in latex
+    assert latex.index(r"\scalebox{0.75}{%") < latex.index(r"\begin{tabular}")
+
+
+def test_grid_to_latex_with_scale_factor_full_document_adds_graphicx() -> None:
+    grid = _simple_grid_2x2()
+    options = ConversionOptions(scale_factor=0.75, full_document=True)
+
+    latex = grid_to_latex(grid, options)
+
+    assert r"\usepackage{graphicx}" in latex
+
+
 # ---------------------------------------------------------------------------
 # Caption and label
 # ---------------------------------------------------------------------------

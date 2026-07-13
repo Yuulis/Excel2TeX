@@ -354,3 +354,20 @@ def dataframe_to_grid(
         rows.append(cells)
 
     return TableGrid(rows=rows, has_header=include_header)
+
+
+def grid_to_dataframe(grid: TableGrid) -> pd.DataFrame:
+    """Convert the current editable grid into a pandas DataFrame.
+
+    The first grid row is used as column names when ``has_header`` is true.
+    Cell content is already stored as text, so empty cells remain empty strings.
+    """
+    import pandas as pd_mod
+
+    if not grid.rows:
+        return pd_mod.DataFrame()
+
+    values = [[cell.content for cell in row] for row in grid.rows]
+    if grid.has_header:
+        return pd_mod.DataFrame(values[1:], columns=values[0])
+    return pd_mod.DataFrame(values)

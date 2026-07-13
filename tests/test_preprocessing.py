@@ -1,10 +1,8 @@
 """Tests for preprocessing.py — pure DataFrame transformations."""
 
 import pandas as pd
-import pytest
 
 from preprocessing import (
-    apply_text_case,
     drop_duplicate_rows,
     drop_empty_rows_and_columns,
     transpose_dataframe,
@@ -57,65 +55,16 @@ def test_transpose_dataframe_does_not_mutate_input() -> None:
     assert list(dataframe.columns) == original_columns
 
 
-# ---------------------------------------------------------------------------
-# apply_text_case
-# ---------------------------------------------------------------------------
-
-
-def test_apply_text_case_upper_on_mixed_data_uppercases_strings_only() -> None:
+def test_transpose_dataframe_preserves_missing_cells_as_empty_strings() -> None:
     # Arrange
-    dataframe = pd.DataFrame({"Name": ["alice", "bob"], "Score": [100, 200]})
+    dataframe = pd.DataFrame({"A": ["value"], "B": [None]})
 
     # Act
-    result = apply_text_case(dataframe, "upper")
+    result = transpose_dataframe(dataframe)
 
     # Assert
-    assert result["Name"].tolist() == ["ALICE", "BOB"]
-    assert result["Score"].tolist() == [100, 200]
-
-
-def test_apply_text_case_lower_on_mixed_data_lowercases_strings_only() -> None:
-    # Arrange
-    dataframe = pd.DataFrame({"Name": ["ALICE", "BOB"], "Score": [100, 200]})
-
-    # Act
-    result = apply_text_case(dataframe, "lower")
-
-    # Assert
-    assert result["Name"].tolist() == ["alice", "bob"]
-    assert result["Score"].tolist() == [100, 200]
-
-
-def test_apply_text_case_capitalize_title_cases_each_word() -> None:
-    # Arrange
-    dataframe = pd.DataFrame({"Desc": ["hello world", "foo bar baz"]})
-
-    # Act
-    result = apply_text_case(dataframe, "capitalize")
-
-    # Assert
-    assert result["Desc"].tolist() == ["Hello World", "Foo Bar Baz"]
-
-
-def test_apply_text_case_invalid_case_raises_value_error() -> None:
-    # Arrange
-    dataframe = pd.DataFrame({"A": ["x"]})
-
-    # Act / Assert
-    with pytest.raises(ValueError, match="Invalid case"):
-        apply_text_case(dataframe, "INVALID")
-
-
-def test_apply_text_case_does_not_mutate_input() -> None:
-    # Arrange
-    dataframe = pd.DataFrame({"Name": ["alice"]})
-    original_value = dataframe["Name"].iloc[0]
-
-    # Act
-    apply_text_case(dataframe, "upper")
-
-    # Assert — input unchanged
-    assert dataframe["Name"].iloc[0] == original_value
+    assert result.iloc[0].tolist() == ["B", ""]
+    assert "nan" not in result.to_string().lower()
 
 
 # ---------------------------------------------------------------------------

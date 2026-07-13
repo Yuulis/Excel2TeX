@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,7 @@ _ALIGNMENT_COMMANDS = {
     "left": r"\raggedright",
     "right": r"\raggedleft",
 }
+_SCALE_FACTOR_ERROR = "Scale factor must be a positive number."
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,28 @@ class ConversionOptions:
     border_style: str = "all"
     table_type: str = "tabular"
     full_document: bool = False
+    scale_factor: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate options that must remain safe LaTeX command arguments."""
+        if self.scale_factor is None:
+            return
+        if not isfinite(self.scale_factor) or self.scale_factor <= 0:
+            raise ValueError(_SCALE_FACTOR_ERROR)
+
+
+def parse_scale_factor(value: str) -> float | None:
+    """Parse a Scale box field value; a blank value disables scaling."""
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        scale_factor = float(stripped)
+    except ValueError as error:
+        raise ValueError(_SCALE_FACTOR_ERROR) from error
+    if not isfinite(scale_factor) or scale_factor <= 0:
+        raise ValueError(_SCALE_FACTOR_ERROR)
+    return scale_factor
 
 
 def dataframe_to_latex(
@@ -232,7 +256,11 @@ def _build_table_lines(
         if options.label and options.label.strip():
             lines.append(rf"\label{{{options.label}}}")
 
-    # --- begin inner environment ---
+    # --- optional scale wrapper and inner environment ---
+    scale_box_opening = _scale_box_opening(options)
+    if scale_box_opening is not None:
+        lines.append(scale_box_opening)
+
     if options.table_type == "tabularx":
         lines.append(rf"\begin{{tabularx}}{{\textwidth}}{{{col_spec}}}")
     elif is_longtable:
@@ -276,11 +304,22 @@ def _build_table_lines(
     env_name = options.table_type
     lines.append(rf"\end{{{env_name}}}")
 
+    if scale_box_opening is not None:
+        lines.append("}")
+
     # --- end outer float ---
     if not is_longtable:
         lines.append(r"\end{table}")
 
     return lines
+
+
+def _scale_box_opening(options: ConversionOptions) -> str | None:
+    """Return a scalebox opening command when scaling applies to the table."""
+    if options.scale_factor is None or options.table_type == "longtable":
+        return None
+    factor = format(options.scale_factor, "g")
+    return rf"\scalebox{{{factor}}}{{%"
 
 
 # ---------- MWE wrapper ----------------------------------------------------
@@ -300,6 +339,8 @@ def _wrap_full_document(
         packages.append("longtable")
     if options.table_type == "tabularx":
         packages.append("tabularx")
+    if _scale_box_opening(options) is not None:
+        packages.append("graphicx")
 
     for pkg in sorted(packages):
         lines.append(rf"\usepackage{{{pkg}}}")

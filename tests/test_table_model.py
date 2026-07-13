@@ -3,7 +3,13 @@
 import pandas as pd
 import pytest
 
-from table_model import Cell, CellAlignment, TableGrid, dataframe_to_grid
+from table_model import (
+    Cell,
+    CellAlignment,
+    TableGrid,
+    dataframe_to_grid,
+    grid_to_dataframe,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,6 +81,52 @@ def test_dataframe_to_grid_with_nan_converts_to_empty_string() -> None:
     # Assert — NaN becomes ""
     assert grid.rows[1][0].content == ""
     assert grid.rows[2][0].content == "1.0"
+
+
+def test_grid_to_dataframe_uses_current_edited_content() -> None:
+    # Arrange
+    grid = dataframe_to_grid(pd.DataFrame({"Name": ["Alice", "Bob"]}))
+    grid.set_content(1, 0, "Carol")
+
+    # Act
+    dataframe = grid_to_dataframe(grid)
+
+    # Assert
+    assert dataframe["Name"].tolist() == ["Carol", "Bob"]
+
+
+def test_grid_to_dataframe_preserves_empty_cells() -> None:
+    # Arrange
+    grid = TableGrid(
+        rows=[
+            [Cell(content="A"), Cell(content="B")],
+            [Cell(content="value"), Cell(content="")],
+        ]
+    )
+
+    # Act
+    dataframe = grid_to_dataframe(grid)
+
+    # Assert
+    assert dataframe.iloc[0].tolist() == ["value", ""]
+
+
+def test_drop_operations_can_use_current_grid_content() -> None:
+    # Arrange
+    from preprocessing import drop_duplicate_rows, drop_empty_rows_and_columns
+
+    grid = dataframe_to_grid(pd.DataFrame({"A": ["first", "second"], "B": ["x", "y"]}))
+    grid.set_content(2, 0, "first")
+    grid.set_content(2, 1, "x")
+    grid.insert_row(3)
+
+    # Act
+    current = grid_to_dataframe(grid)
+    without_empty = drop_empty_rows_and_columns(current)
+    without_duplicates = drop_duplicate_rows(without_empty)
+
+    # Assert
+    assert without_duplicates.to_dict(orient="records") == [{"A": "first", "B": "x"}]
 
 
 # ---------------------------------------------------------------------------

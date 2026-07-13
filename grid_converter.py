@@ -14,6 +14,7 @@ from converter import (
     _escape_latex,
     _escaped_caption,
     _join_row,
+    _scale_box_opening,
     _top_rule,
 )
 from table_model import Cell, CellAlignment, TableGrid
@@ -265,7 +266,11 @@ def _build_grid_table_lines(
         if options.label and options.label.strip():
             lines.append(rf"\label{{{options.label}}}")
 
-    # --- begin inner environment ---
+    # --- optional scale wrapper and inner environment ---
+    scale_box_opening = _scale_box_opening(options)
+    if scale_box_opening is not None:
+        lines.append(scale_box_opening)
+
     if options.table_type == "tabularx":
         lines.append(rf"\begin{{tabularx}}{{\textwidth}}{{{col_spec}}}")
     elif is_longtable:
@@ -293,6 +298,9 @@ def _build_grid_table_lines(
     # --- end inner environment ---
     env_name = options.table_type
     lines.append(rf"\end{{{env_name}}}")
+
+    if scale_box_opening is not None:
+        lines.append("}")
 
     # --- end outer float ---
     if not is_longtable:
@@ -324,6 +332,8 @@ def _wrap_grid_full_document(
         packages.append("longtable")
     if options.table_type == "tabularx":
         packages.append("tabularx")
+    if _scale_box_opening(options) is not None:
+        packages.append("graphicx")
 
     has_multirow = any(
         cell.rowspan > 1 for row in grid.rows for cell in row if not cell.is_covered

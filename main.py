@@ -1,27 +1,55 @@
+from __future__ import annotations
+
 import copy
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import flet as ft
 
-from converter import ConversionOptions, dataframe_to_latex, read_table_file
+from converter import (
+    ConversionOptions,
+    dataframe_to_latex,
+    parse_scale_factor,
+    read_table_file,
+)
 from grid_converter import grid_to_latex
 from grid_editor import GridEditor, grid_has_merges
 from grid_history import GridHistory
 from grid_toolbar import alignment_to_label, build_grid_toolbar
 from preprocessing import (
-    apply_text_case,
     drop_duplicate_rows,
     drop_empty_rows_and_columns,
     transpose_dataframe,
 )
-from table_model import dataframe_to_grid
+from table_model import TableGrid, dataframe_to_grid, grid_to_dataframe
+from ui_layout import (
+    BUTTON_HEIGHT,
+    BUTTON_WIDTH,
+    CENTER_PANE_EXPAND,
+    LEFT_PANE_EXPAND,
+    PAGE_PADDING,
+    PANE_PADDING,
+    PANE_SPACING,
+    PANEL_BORDER_RADIUS,
+    PANEL_BORDER_WIDTH,
+    PANEL_PADDING,
+    PANEL_SPACING,
+    RIGHT_PANE_EXPAND,
+)
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+_SCALE_BOX_INPUT_ERROR = "Scale boxには正の数を入力してください。"
 
 
 async def main(page: ft.Page) -> None:
     page.title = "Excel2TeX"
-    page.padding = 24
-    page.spacing = 16
+    page.padding = PAGE_PADDING
+    page.spacing = PANE_SPACING
     page.theme_mode = ft.ThemeMode.DARK
     page.theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)
+    page.window.maximized = True
 
     clipboard = ft.Clipboard()
     page.services.append(clipboard)
@@ -78,6 +106,13 @@ async def main(page: ft.Page) -> None:
     )
     full_document_checkbox = ft.Checkbox(label="Full document (MWE)", value=False)
     float_position_switch = ft.Switch(label="Float position [htbp]", value=True)
+    scale_box_field = ft.TextField(
+        label="Scale box",
+        hint_text="e.g. 0.85 (blank = off)",
+        value="",
+        dense=True,
+        keyboard_type=ft.KeyboardType.NUMBER,
+    )
 
     # --- Style & Design controls ---
 
@@ -124,6 +159,13 @@ async def main(page: ft.Page) -> None:
 
     def _build_options() -> ConversionOptions:
         """Gather all control values into a ConversionOptions."""
+        table_type = table_type_dropdown.value or "tabular"
+        scale_factor: float | None = None
+        if table_type != "longtable":
+            try:
+                scale_factor = parse_scale_factor(scale_box_field.value or "")
+            except ValueError:
+                pass
         return ConversionOptions(
             caption=caption_field.value or None,
             label=label_field.value or None,
@@ -135,8 +177,9 @@ async def main(page: ft.Page) -> None:
             float_position="htbp",
             escape=bool(escape_switch.value),
             border_style=border_style_dropdown.value or "all",
-            table_type=table_type_dropdown.value or "tabular",
+            table_type=table_type,
             full_document=bool(full_document_checkbox.value),
+            scale_factor=scale_factor,
         )
 
     def render_output() -> None:
@@ -289,7 +332,7 @@ async def main(page: ft.Page) -> None:
     )
 
     def _apply_preprocessing(
-        operation: object,
+        operation: Callable[[pd.DataFrame], pd.DataFrame],
         message: str,
     ) -> None:
         """Apply a DataFrame preprocessing operation with merge guard."""
@@ -301,10 +344,15 @@ async def main(page: ft.Page) -> None:
             set_status(_MERGE_GUARD_MSG, is_error=True)
             page.update()
             return
-        if state["grid"] is not None:
-            history.push(state["grid"])
+        grid = state["grid"]
+        if not isinstance(grid, TableGrid):
+            set_status("No editable table is available.", is_error=True)
+            page.update()
+            return
+        history.push(grid)
         state["edit_session_cell"] = None
-        state["dataframe"] = operation(state["dataframe"])
+        current_dataframe = grid_to_dataframe(grid)
+        state["dataframe"] = operation(current_dataframe)
         state["grid"] = dataframe_to_grid(state["dataframe"])
         _refresh_grid_view()
         render_output()
@@ -315,6 +363,16 @@ async def main(page: ft.Page) -> None:
     # --- event handlers ---
 
     async def on_option_change(event: ft.ControlEvent) -> None:
+        scale_box_field.disabled = table_type_dropdown.value == "longtable"
+        scale_box_field.error_text = None
+        if not scale_box_field.disabled:
+            try:
+                parse_scale_factor(scale_box_field.value or "")
+            except ValueError:
+                scale_box_field.error_text = _SCALE_BOX_INPUT_ERROR
+                set_status(_SCALE_BOX_INPUT_ERROR, is_error=True)
+                page.update()
+                return
         if event.control in preview_style_controls and state["grid"] is not None:
             _refresh_grid_view()
         render_output()
@@ -417,22 +475,6 @@ async def main(page: ft.Page) -> None:
     async def on_transpose(_: ft.ControlEvent) -> None:
         _apply_preprocessing(transpose_dataframe, "Transposed data.")
 
-    async def on_uppercase(_: ft.ControlEvent) -> None:
-        _apply_preprocessing(
-            lambda df: apply_text_case(df, "upper"), "Applied UPPERCASE."
-        )
-
-    async def on_lowercase(_: ft.ControlEvent) -> None:
-        _apply_preprocessing(
-            lambda df: apply_text_case(df, "lower"), "Applied lowercase."
-        )
-
-    async def on_capitalize(_: ft.ControlEvent) -> None:
-        _apply_preprocessing(
-            lambda df: apply_text_case(df, "capitalize"),
-            "Applied Capitalize.",
-        )
-
     async def on_drop_empty(_: ft.ControlEvent) -> None:
         _apply_preprocessing(
             drop_empty_rows_and_columns,
@@ -467,6 +509,7 @@ async def main(page: ft.Page) -> None:
         caption_field,
         label_field,
         table_type_dropdown,
+        scale_box_field,
         full_document_checkbox,
         float_position_switch,
         border_style_dropdown,
@@ -516,31 +559,51 @@ async def main(page: ft.Page) -> None:
                     content="Select file",
                     icon=ft.Icons.FOLDER_OPEN,
                     on_click=open_file_picker,
+                    width=BUTTON_WIDTH,
+                    height=BUTTON_HEIGHT,
                 ),
                 selected_file_text,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=12,
+            spacing=PANEL_SPACING,
         ),
-        border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
-        border_radius=8,
-        padding=24,
+        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
+        border_radius=PANEL_BORDER_RADIUS,
+        padding=PANEL_PADDING,
         on_click=open_file_picker,
     )
 
     operation_buttons = ft.Row(
         controls=[
-            ft.OutlinedButton(content="Transpose", on_click=on_transpose),
-            ft.OutlinedButton(content="UPPERCASE", on_click=on_uppercase),
-            ft.OutlinedButton(content="lowercase", on_click=on_lowercase),
-            ft.OutlinedButton(content="Capitalize", on_click=on_capitalize),
-            ft.OutlinedButton(content="Drop empty", on_click=on_drop_empty),
-            ft.OutlinedButton(content="Drop duplicates", on_click=on_drop_duplicates),
-            ft.OutlinedButton(content="Reset", on_click=on_reset),
+            ft.OutlinedButton(
+                content="Transpose",
+                on_click=on_transpose,
+                width=BUTTON_WIDTH,
+                height=BUTTON_HEIGHT,
+            ),
+            ft.OutlinedButton(
+                content="Drop empty",
+                on_click=on_drop_empty,
+                width=BUTTON_WIDTH,
+                height=BUTTON_HEIGHT,
+            ),
+            ft.OutlinedButton(
+                content="Drop duplicates",
+                on_click=on_drop_duplicates,
+                width=BUTTON_WIDTH,
+                height=BUTTON_HEIGHT,
+            ),
+            ft.OutlinedButton(
+                content="Reset",
+                on_click=on_reset,
+                width=BUTTON_WIDTH,
+                height=BUTTON_HEIGHT,
+            ),
         ],
         wrap=True,
         spacing=8,
         run_spacing=8,
+        alignment=ft.MainAxisAlignment.CENTER,
     )
 
     data_source_panel = ft.Container(
@@ -553,11 +616,12 @@ async def main(page: ft.Page) -> None:
                 upload_zone,
                 operation_buttons,
             ],
-            spacing=12,
+            spacing=PANEL_SPACING,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
-        border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
-        border_radius=8,
-        padding=16,
+        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
+        border_radius=PANEL_BORDER_RADIUS,
+        padding=PANEL_PADDING,
     )
 
     additional_info_panel = ft.Container(
@@ -567,11 +631,12 @@ async def main(page: ft.Page) -> None:
                 caption_field,
                 label_field,
             ],
-            spacing=12,
+            spacing=PANEL_SPACING,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
-        border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
-        border_radius=8,
-        padding=16,
+        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
+        border_radius=PANEL_BORDER_RADIUS,
+        padding=PANEL_PADDING,
     )
 
     structure_type_panel = ft.Container(
@@ -579,14 +644,16 @@ async def main(page: ft.Page) -> None:
             controls=[
                 ft.Text("Structure & Type", theme_style=ft.TextThemeStyle.TITLE_SMALL),
                 table_type_dropdown,
+                scale_box_field,
                 full_document_checkbox,
                 float_position_switch,
             ],
-            spacing=12,
+            spacing=PANEL_SPACING,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
-        border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
-        border_radius=8,
-        padding=16,
+        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
+        border_radius=PANEL_BORDER_RADIUS,
+        padding=PANEL_PADDING,
     )
 
     style_design_panel = ft.Container(
@@ -600,11 +667,12 @@ async def main(page: ft.Page) -> None:
                 text_alignment_dropdown,
                 escape_switch,
             ],
-            spacing=12,
+            spacing=PANEL_SPACING,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
-        border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
-        border_radius=8,
-        padding=16,
+        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
+        border_radius=PANEL_BORDER_RADIUS,
+        padding=PANEL_PADDING,
     )
 
     # --- 3-pane layout: left (options), center (table preview), right (TeX) ---
@@ -619,11 +687,11 @@ async def main(page: ft.Page) -> None:
                 style_design_panel,
                 status_text,
             ],
-            spacing=16,
+            spacing=PANE_SPACING,
             scroll=ft.ScrollMode.AUTO,
         ),
-        expand=2,
-        padding=16,
+        expand=LEFT_PANE_EXPAND,
+        padding=PANE_PADDING,
     )
 
     grid_scroll_column = ft.Column(
@@ -648,16 +716,16 @@ async def main(page: ft.Page) -> None:
                 ft.Container(
                     content=grid_scroll_column,
                     expand=True,
-                    border=ft.Border.all(1, ft.Colors.BLUE_GREY_200),
-                    border_radius=8,
+                    border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
+                    border_radius=PANEL_BORDER_RADIUS,
                     padding=8,
                 ),
             ],
-            spacing=12,
+            spacing=PANE_SPACING,
             expand=True,
         ),
-        expand=4,
-        padding=16,
+        expand=CENTER_PANE_EXPAND,
+        padding=PANE_PADDING,
     )
 
     right_pane = ft.Container(
@@ -673,11 +741,15 @@ async def main(page: ft.Page) -> None:
                             content="Copy",
                             icon=ft.Icons.CONTENT_COPY,
                             on_click=copy_output,
+                            width=BUTTON_WIDTH,
+                            height=BUTTON_HEIGHT,
                         ),
                         ft.FilledButton(
                             content="Download (.tex)",
                             icon=ft.Icons.DOWNLOAD,
                             on_click=download_output,
+                            width=BUTTON_WIDTH,
+                            height=BUTTON_HEIGHT,
                         ),
                     ],
                     wrap=True,
@@ -686,11 +758,11 @@ async def main(page: ft.Page) -> None:
                 ),
                 output_field,
             ],
-            spacing=12,
+            spacing=PANE_SPACING,
             expand=True,
         ),
-        expand=3,
-        padding=16,
+        expand=RIGHT_PANE_EXPAND,
+        padding=PANE_PADDING,
     )
 
     page.add(

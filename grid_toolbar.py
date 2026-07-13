@@ -15,6 +15,7 @@ import flet as ft
 
 from grid_editor import GridEditor
 from table_model import CellAlignment
+from ui_layout import BUTTON_HEIGHT, BUTTON_WIDTH
 
 # -- Type aliases for caller-supplied callbacks --------------------------------
 
@@ -208,7 +209,6 @@ def build_grid_toolbar(
         value="Inherit",
         options=[ft.dropdown.Option(label) for label in _ALIGNMENT_MAP],
         dense=True,
-        width=140,
     )
 
     def set_alignment_display(label: str) -> None:
@@ -322,6 +322,11 @@ def build_grid_toolbar(
         wrap=True,
         run_spacing=4,
     )
+
+    for row in (merge_split_row, insert_delete_row):
+        for control in row.controls:
+            control.width = BUTTON_WIDTH
+            control.height = BUTTON_HEIGHT
 
     toolbar = ft.Column(
         controls=[merge_split_row, insert_delete_row],

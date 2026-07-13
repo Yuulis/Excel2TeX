@@ -1,5 +1,7 @@
 """Tests for grid_editor: interactive Flet grid editor with selection and editing."""
 
+from types import SimpleNamespace
+
 import flet as ft
 import pytest
 
@@ -8,7 +10,9 @@ from grid_converter import grid_to_latex
 from grid_editor import (
     CELL_HEIGHT,
     CELL_WIDTH,
+    COLUMN_SELECTOR_HEIGHT,
     DEFAULT_VIEWPORT_HEIGHT,
+    ROW_SELECTOR_WIDTH,
     VIRTUALIZE_ROW_THRESHOLD,
     GridEditor,
     build_grid_view,
@@ -101,14 +105,14 @@ class TestBuildGridViewSimple:
     def test_control_count_matches_cells(self) -> None:
         result = build_grid_view(_simple_grid_2x2())
         stack = result.content
-        # 2x2 grid = 4 cells, no merges => 4 controls
-        assert len(stack.controls) == 4
+        # 4 cells + corner + 2 row + 2 column selectors.
+        assert len(stack.controls) == 9
 
     def test_container_dimensions(self) -> None:
         grid = _simple_grid_2x2()
         result = build_grid_view(grid)
-        assert result.width == 2 * CELL_WIDTH
-        assert result.height == 2 * CELL_HEIGHT
+        assert result.width == ROW_SELECTOR_WIDTH + 2 * CELL_WIDTH
+        assert result.height == COLUMN_SELECTOR_HEIGHT + 2 * CELL_HEIGHT
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +126,14 @@ class TestBuildGridViewMerged:
     def test_colspan_reduces_control_count(self) -> None:
         result = build_grid_view(_merged_colspan_grid())
         stack = result.content
-        # 3x3 = 9 cells, 1 covered by colspan => 8 controls
-        assert len(stack.controls) == 8
+        # 8 visible cells + corner + 3 row + 3 column selectors.
+        assert len(stack.controls) == 15
 
     def test_rowspan_reduces_control_count(self) -> None:
         result = build_grid_view(_merged_rowspan_grid())
         stack = result.content
-        # 3x2 = 6 cells, 1 covered by rowspan => 5 controls
-        assert len(stack.controls) == 5
+        # 5 visible cells + corner + 3 row + 2 column selectors.
+        assert len(stack.controls) == 11
 
     def test_colspan_cell_has_scaled_width(self) -> None:
         result = build_grid_view(_merged_colspan_grid())
@@ -158,8 +162,8 @@ class TestBuildGridViewMerged:
         grid.merge_cells(0, 0, 2, 2)
         result = build_grid_view(grid)
         stack = result.content
-        # 3x3 = 9 cells, 3 covered => 6 controls
-        assert len(stack.controls) == 6
+        # 6 visible cells + corner + 3 row + 3 column selectors.
+        assert len(stack.controls) == 13
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +188,7 @@ class TestGridEditorBuild:
         editor = GridEditor(_merged_colspan_grid())
         result = editor.build()
         stack = result.content
-        assert len(stack.controls) == 8
+        assert len(stack.controls) == 15
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +224,42 @@ class TestGridEditorSelection:
         # Selecting the same cell again should not change state.
         editor._select_cell(0, 0)
         assert editor.selected_cell == (0, 0)
+
+    def test_select_row_uses_full_row_rectangle(self) -> None:
+        editor = GridEditor(_simple_grid_2x2())
+        editor.build()
+
+        editor.select_row(1)
+
+        assert editor.selected_cell == (1, 0)
+        assert editor.get_selection_rect() == (1, 0, 1, 1)
+        assert editor._row_selector_containers[1].bgcolor == ft.Colors.BLUE_700
+
+    def test_select_column_uses_full_column_rectangle(self) -> None:
+        editor = GridEditor(_simple_grid_2x2())
+        editor.build()
+
+        editor.select_column(1)
+
+        assert editor.selected_cell == (0, 1)
+        assert editor.get_selection_rect() == (0, 1, 1, 1)
+        assert editor._column_selector_containers[1].bgcolor == ft.Colors.BLUE_700
+
+    def test_preview_builds_clickable_row_and_column_selectors(self) -> None:
+        editor = GridEditor(_simple_grid_2x2())
+        editor.build()
+
+        row_selector = editor._row_selector_containers[1]
+        row_click = row_selector.on_click
+        assert callable(row_click)
+        row_click(SimpleNamespace(page=None))
+        assert editor.get_selection_rect() == (1, 0, 1, 1)
+
+        column_selector = editor._column_selector_containers[1]
+        column_click = column_selector.on_click
+        assert callable(column_click)
+        column_click(SimpleNamespace(page=None))
+        assert editor.get_selection_rect() == (0, 1, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1030,23 @@ def test_grid_toolbar_primary_actions_wrap() -> None:
     assert primary_actions.run_spacing == 4
 
 
+def test_grid_toolbar_controls_use_consistent_dimensions() -> None:
+    """All toolbar controls should align to a consistent full-screen grid."""
+    from grid_toolbar import build_grid_toolbar
+    from ui_layout import BUTTON_HEIGHT, BUTTON_WIDTH
+
+    result = build_grid_toolbar(
+        get_editor=lambda: None,
+        set_status=lambda _message, _is_error: None,
+        page_update=lambda: None,
+    )
+
+    for row in result.toolbar.controls:
+        for control in row.controls:
+            assert control.width == BUTTON_WIDTH
+            assert control.height == BUTTON_HEIGHT
+
+
 # ---------------------------------------------------------------------------
 # Tests -- viewport windowing: should_use_windowing
 # ---------------------------------------------------------------------------
@@ -1131,7 +1188,7 @@ class TestGridEditorWindowing:
         editor = GridEditor(grid)
         result = editor.build()
         stack = result.content
-        assert len(stack.controls) == 4  # All 4 cells
+        assert len(stack.controls) == 9  # 4 cells + 5 selectors
 
     def test_large_grid_builds_fewer_controls(self) -> None:
         """At/above threshold: only visible-window controls built."""
@@ -1152,8 +1209,8 @@ class TestGridEditorWindowing:
         grid = TableGrid(rows=rows, has_header=True)
         editor = GridEditor(grid)
         result = editor.build()
-        assert result.width == 3 * CELL_WIDTH
-        assert result.height == num_rows * CELL_HEIGHT
+        assert result.width == ROW_SELECTOR_WIDTH + 3 * CELL_WIDTH
+        assert result.height == COLUMN_SELECTOR_HEIGHT + num_rows * CELL_HEIGHT
 
     def test_handle_scroll_noop_for_small_grid(self) -> None:
         """handle_scroll returns False for non-windowed grids."""

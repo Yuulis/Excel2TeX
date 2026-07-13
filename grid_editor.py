@@ -28,9 +28,13 @@ from table_model import CellAlignment, TableGrid
 
 CELL_WIDTH = 120
 CELL_HEIGHT = 40
+ROW_SELECTOR_WIDTH = 40
+COLUMN_SELECTOR_HEIGHT = 28
 HEADER_BG = ft.Colors.BLUE_GREY_800
 CELL_BG = ft.Colors.BLUE_GREY_900
 SELECTED_BG = ft.Colors.BLUE_900
+SELECTOR_BG = ft.Colors.BLUE_GREY_700
+SELECTED_SELECTOR_BG = ft.Colors.BLUE_700
 BORDER_COLOR = ft.Colors.BLUE_GREY_600
 SELECTED_BORDER_COLOR = ft.Colors.BLUE_300
 TEXT_COLOR = ft.Colors.GREY_100
@@ -123,8 +127,12 @@ class GridEditor:
         self._selection_start: tuple[int, int] | None = None
         self._selection_end: tuple[int, int] | None = None
         self._range_mode: bool = False
+        self._selection_scope: str = "cell"
 
         self._cell_containers: dict[tuple[int, int], ft.Container] = {}
+        self._row_selector_containers: dict[int, ft.Container] = {}
+        self._column_selector_containers: dict[int, ft.Container] = {}
+        self._corner_selector: ft.Container | None = None
 
         # Windowing state (large-table optimization)
         self._stack: ft.Stack | None = None
@@ -147,9 +155,10 @@ class GridEditor:
         if self._grid.num_rows == 0 or self._grid.num_cols == 0:
             return ft.Text("No data to display.", color=ft.Colors.GREY_500)
 
-        total_width = self._grid.num_cols * CELL_WIDTH
-        total_height = self._grid.num_rows * CELL_HEIGHT
+        total_width = ROW_SELECTOR_WIDTH + self._grid.num_cols * CELL_WIDTH
+        total_height = COLUMN_SELECTOR_HEIGHT + self._grid.num_rows * CELL_HEIGHT
         self._cell_containers.clear()
+        self._clear_selector_controls()
         self._windowed = should_use_windowing(self._grid.num_rows)
 
         if self._windowed:
@@ -166,7 +175,10 @@ class GridEditor:
         else:
             cell_controls = self._build_cell_controls()
 
-        self._stack = ft.Stack(controls=cell_controls)
+        selector_controls = self._build_selector_controls(
+            self._visible_range if self._windowed else None
+        )
+        self._stack = ft.Stack(controls=[*cell_controls, *selector_controls])
         return ft.Container(
             content=self._stack,
             width=total_width,
@@ -199,9 +211,10 @@ class GridEditor:
             return False
         self._visible_range = new_range
         self._cell_containers.clear()
-        self._stack.controls = self._build_cell_controls_for_range(
-            new_range,
-        )
+        self._clear_selector_controls()
+        cell_controls = self._build_cell_controls_for_range(new_range)
+        selector_controls = self._build_selector_controls(new_range)
+        self._stack.controls = [*cell_controls, *selector_controls]
         self._update_selection_highlight()
         return True
 
@@ -236,7 +249,11 @@ class GridEditor:
         (single-cell selection).
         """
         self._range_mode = enabled
-        if not enabled and self._selection_start is not None:
+        if (
+            not enabled
+            and self._selection_start is not None
+            and self._selection_scope == "cell"
+        ):
             self._selection_end = self._selection_start
             self._update_selection_highlight()
 
@@ -251,6 +268,34 @@ class GridEditor:
         r0, c0 = self._selection_start
         r1, c1 = self._selection_end
         return (min(r0, r1), min(c0, c1), max(r0, r1), max(c0, c1))
+
+    def select_row(self, row: int) -> None:
+        """Select an entire row through its preview-side row selector."""
+        if row < 0 or row >= self._grid.num_rows:
+            raise IndexError("Row selection is outside the grid.")
+        self._selection_start = (row, 0)
+        self._selection_end = (row, self._grid.num_cols - 1)
+        self._selection_scope = "row"
+        self._notify_selection_change(row, 0)
+        self._update_selection_highlight()
+
+    def select_column(self, col: int) -> None:
+        """Select an entire column through its preview-top column selector."""
+        if col < 0 or col >= self._grid.num_cols:
+            raise IndexError("Column selection is outside the grid.")
+        self._selection_start = (0, col)
+        self._selection_end = (self._grid.num_rows - 1, col)
+        self._selection_scope = "column"
+        self._notify_selection_change(0, col)
+        self._update_selection_highlight()
+
+    def select_all(self) -> None:
+        """Select the entire table through the preview corner selector."""
+        self._selection_start = (0, 0)
+        self._selection_end = (self._grid.num_rows - 1, self._grid.num_cols - 1)
+        self._selection_scope = "all"
+        self._notify_selection_change(0, 0)
+        self._update_selection_highlight()
 
     def _notify_grid_change(self) -> None:
         """Invoke the grid-change callback if one is registered."""
@@ -454,6 +499,97 @@ class GridEditor:
                 controls.append(control)
         return controls
 
+    def _clear_selector_controls(self) -> None:
+        """Clear cached row and column selector controls before rebuilding."""
+        self._row_selector_containers.clear()
+        self._column_selector_containers.clear()
+        self._corner_selector = None
+
+    def _build_selector_controls(
+        self,
+        row_range: tuple[int, int] | None,
+    ) -> list[ft.Control]:
+        """Build clickable spreadsheet-style row and column selectors."""
+        controls: list[ft.Control] = []
+
+        def select_all(event: ft.ControlEvent) -> None:
+            self.select_all()
+            if event.page is not None:
+                event.page.update()
+
+        corner = self._selector_container(
+            label="",
+            left=0,
+            top=0,
+            width=ROW_SELECTOR_WIDTH,
+            height=COLUMN_SELECTOR_HEIGHT,
+            on_click=select_all,
+        )
+        self._corner_selector = corner
+        controls.append(corner)
+
+        for col in range(self._grid.num_cols):
+
+            def select_column(event: ft.ControlEvent, col_index: int = col) -> None:
+                self.select_column(col_index)
+                if event.page is not None:
+                    event.page.update()
+
+            selector = self._selector_container(
+                label=_column_label(col),
+                left=ROW_SELECTOR_WIDTH + col * CELL_WIDTH,
+                top=0,
+                width=CELL_WIDTH,
+                height=COLUMN_SELECTOR_HEIGHT,
+                on_click=select_column,
+            )
+            self._column_selector_containers[col] = selector
+            controls.append(selector)
+
+        first_row, last_row = row_range or (0, self._grid.num_rows - 1)
+        for row in range(first_row, last_row + 1):
+
+            def select_row(event: ft.ControlEvent, row_index: int = row) -> None:
+                self.select_row(row_index)
+                if event.page is not None:
+                    event.page.update()
+
+            selector = self._selector_container(
+                label=str(row + 1),
+                left=0,
+                top=COLUMN_SELECTOR_HEIGHT + row * CELL_HEIGHT,
+                width=ROW_SELECTOR_WIDTH,
+                height=CELL_HEIGHT,
+                on_click=select_row,
+            )
+            self._row_selector_containers[row] = selector
+            controls.append(selector)
+
+        return controls
+
+    def _selector_container(
+        self,
+        *,
+        label: str,
+        left: int,
+        top: int,
+        width: int,
+        height: int,
+        on_click: Callable[[ft.ControlEvent], None],
+    ) -> ft.Container:
+        """Create one clickable row, column, or corner selector."""
+        return ft.Container(
+            content=ft.Text(label, color=TEXT_COLOR, weight=ft.FontWeight.BOLD),
+            left=left,
+            top=top,
+            width=width,
+            height=height,
+            alignment=ft.Alignment.CENTER,
+            bgcolor=SELECTOR_BG,
+            border=ft.Border.all(BORDER_WIDTH, BORDER_COLOR),
+            on_click=on_click,
+        )
+
     def _build_single_cell(
         self,
         *,
@@ -469,8 +605,8 @@ class GridEditor:
         Width and height scale by *colspan* and *rowspan* so that merged
         regions appear as a single large cell.
         """
-        x = col * CELL_WIDTH
-        y = row * CELL_HEIGHT
+        x = ROW_SELECTOR_WIDTH + col * CELL_WIDTH
+        y = COLUMN_SELECTOR_HEIGHT + row * CELL_HEIGHT
         w = colspan * CELL_WIDTH
         h = rowspan * CELL_HEIGHT
         bg = HEADER_BG if is_header else CELL_BG
@@ -571,9 +707,14 @@ class GridEditor:
         else:
             self._selection_start = (row, col)
             self._selection_end = (row, col)
-            if self._on_selection_change is not None:
-                self._on_selection_change(row, col)
+            self._notify_selection_change(row, col)
+        self._selection_scope = "cell"
         self._update_selection_highlight()
+
+    def _notify_selection_change(self, row: int, col: int) -> None:
+        """Notify the page that the primary selection cell changed."""
+        if self._on_selection_change is not None:
+            self._on_selection_change(row, col)
 
     def _update_selection_highlight(self) -> None:
         """Update visual highlighting for all cells based on current selection."""
@@ -592,6 +733,30 @@ class GridEditor:
                 container.bgcolor = HEADER_BG if is_header else CELL_BG
                 cell = self._grid.get_cell(r, c)
                 container.border = self._cell_border(r, cell.rowspan)
+        for row, selector in self._row_selector_containers.items():
+            selected = self._selection_scope in {"row", "all"} and (
+                self._selection_scope == "all"
+                or self._selection_start is not None
+                and self._selection_start[0] == row
+            )
+            self._style_selector(selector, selected)
+        for col, selector in self._column_selector_containers.items():
+            selected = self._selection_scope in {"column", "all"} and (
+                self._selection_scope == "all"
+                or self._selection_start is not None
+                and self._selection_start[1] == col
+            )
+            self._style_selector(selector, selected)
+        if self._corner_selector is not None:
+            self._style_selector(self._corner_selector, self._selection_scope == "all")
+
+    def _style_selector(self, selector: ft.Container, selected: bool) -> None:
+        """Apply selected or default styling to a row/column selector."""
+        selector.bgcolor = SELECTED_SELECTOR_BG if selected else SELECTOR_BG
+        selector.border = ft.Border.all(
+            SELECTED_BORDER_WIDTH if selected else BORDER_WIDTH,
+            SELECTED_BORDER_COLOR if selected else BORDER_COLOR,
+        )
 
     # -- backward compatibility aliases (C1 tests call these) ----------------
 
@@ -603,6 +768,7 @@ class GridEditor:
         """Clear selection and reset all cells to default style."""
         self._selection_start = None
         self._selection_end = None
+        self._selection_scope = "cell"
         self._update_selection_highlight()
 
 
@@ -643,6 +809,16 @@ def _cell_overlaps_rect(
     cell_bottom = cell_row + cell.rowspan - 1
     cell_right = cell_col + cell.colspan - 1
     return cell_row <= r1 and cell_bottom >= r0 and cell_col <= c1 and cell_right >= c0
+
+
+def _column_label(index: int) -> str:
+    """Return spreadsheet-style column labels: A..Z, AA..AZ, and so on."""
+    label = ""
+    value = index + 1
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        label = chr(ord("A") + remainder) + label
+    return label
 
 
 def compute_visible_row_range(
