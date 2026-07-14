@@ -1,0 +1,149 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "ver.*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  UV_PYTHON: "3.11"
+  PYTHONUTF8: "1"
+  FLET_CLI_NO_RICH_OUTPUT: "1"
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag format and main branch ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          if [[ ! "$tag" =~ ^ver\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $tag"
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          tagged_commit="$(git rev-list -n 1 "$tag")"
+          if ! git merge-base --is-ancestor "$tagged_commit" origin/main; then
+            echo "Tag $tag is not attached to a commit on main."
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: validate-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows
+            target: windows
+            runner: windows-latest
+          - platform: macOS
+            target: macos
+            runner: macos-latest
+          - platform: Linux
+            target: linux
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Linux build dependencies
+        if: matrix.target == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          linux_deps="$(uv run python -c 'from flet.utils.linux_deps import linux_dependencies; print(" ".join(linux_dependencies))')"
+          sudo apt-get update --allow-releaseinfo-change
+          sudo apt-get install -y --no-install-recommends $linux_deps
+
+      - name: Build application
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#ver.}"
+          uv run flet build "${{ matrix.target }}" \
+            --yes \
+            --build-version "$version" \
+            --product "Excel2TeX" \
+            --artifact "Excel2TeX"
+
+      - name: Package Windows build
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          $archive = "dist/Excel2TeX-$env:GITHUB_REF_NAME-Windows.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "build/windows/*" -DestinationPath $archive
+
+      - name: Package macOS build
+        if: matrix.target == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/macos/Excel2TeX.app \
+            "dist/Excel2TeX-${GITHUB_REF_NAME}-macOS.zip"
+
+      - name: Package Linux build
+        if: matrix.target == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -C build/linux -czf \
+            "dist/Excel2TeX-${GITHUB_REF_NAME}-Linux.tar.gz" .
+
+      - name: Upload packaged build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Excel2TeX-${{ github.ref_name }}-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  create-release:
+    name: Create draft release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Excel2TeX-${{ github.ref_name }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Excel2TeX $GITHUB_REF_NAME" \
+            --generate-notes \
+            --draft \
+            --verify-tag
