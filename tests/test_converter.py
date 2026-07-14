@@ -3,7 +3,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from converter import ConversionOptions, dataframe_to_latex, read_table_file
+from converter import (
+    ConversionOptions,
+    dataframe_to_latex,
+    parse_scale_factor,
+    read_table_file,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -365,6 +370,52 @@ def test_dataframe_to_latex_with_tabularx_type_uses_textwidth() -> None:
     assert r"\end{tabularx}" in latex_code
     # Still inside a table float
     assert r"\begin{table}" in latex_code
+
+
+# ---------------------------------------------------------------------------
+# Scale box
+# ---------------------------------------------------------------------------
+
+
+def test_parse_scale_factor_with_blank_value_disables_scaling() -> None:
+    assert parse_scale_factor("") is None
+    assert parse_scale_factor("   ") is None
+
+
+def test_parse_scale_factor_with_positive_number_returns_float() -> None:
+    assert parse_scale_factor("0.85") == 0.85
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-a-number", "nan", "inf"])
+def test_parse_scale_factor_with_invalid_value_raises(value: str) -> None:
+    with pytest.raises(ValueError, match="positive number"):
+        parse_scale_factor(value)
+
+
+def test_dataframe_to_latex_with_scale_factor_wraps_tabular() -> None:
+    latex_code = dataframe_to_latex(_simple_df(), ConversionOptions(scale_factor=0.85))
+
+    assert r"\scalebox{0.85}{%" in latex_code
+    assert latex_code.index(r"\scalebox{0.85}{%") < latex_code.index(r"\begin{tabular}")
+    assert latex_code.index(r"\end{tabular}") < latex_code.rindex("}")
+
+
+def test_dataframe_to_latex_with_scale_factor_full_document_adds_graphicx() -> None:
+    latex_code = dataframe_to_latex(
+        _simple_df(),
+        ConversionOptions(scale_factor=0.9, full_document=True),
+    )
+
+    assert r"\usepackage{graphicx}" in latex_code
+
+
+def test_dataframe_to_latex_with_longtable_does_not_apply_scale_box() -> None:
+    latex_code = dataframe_to_latex(
+        _simple_df(),
+        ConversionOptions(scale_factor=0.9, table_type="longtable"),
+    )
+
+    assert r"\scalebox" not in latex_code
 
 
 # ---------------------------------------------------------------------------

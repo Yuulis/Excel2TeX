@@ -5,9 +5,6 @@ Every function returns a NEW DataFrame — inputs are never mutated.
 
 import pandas as pd
 
-# Valid case options for apply_text_case.
-_VALID_CASES = {"upper", "lower", "capitalize"}
-
 
 def transpose_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     """Transpose the entire grid, treating column headers as the first row.
@@ -21,45 +18,14 @@ def transpose_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     """
     full_matrix = [list(dataframe.columns)] + dataframe.astype(object).values.tolist()
     transposed = list(map(list, zip(*full_matrix, strict=False)))
-    new_columns = [str(cell) for cell in transposed[0]]
-    new_data = [[str(cell) for cell in row] for row in transposed[1:]]
+    new_columns = [_cell_to_text(cell) for cell in transposed[0]]
+    new_data = [[_cell_to_text(cell) for cell in row] for row in transposed[1:]]
     return pd.DataFrame(new_data, columns=new_columns)
 
 
-def apply_text_case(dataframe: pd.DataFrame, case: str) -> pd.DataFrame:
-    """Apply a text-case transformation to string/object data cells.
-
-    Numeric and NaN cells are left unchanged.  Column headers are preserved.
-
-    Args:
-        dataframe: Source data.
-        case: One of ``"upper"``, ``"lower"``, or ``"capitalize"``
-              (title-case each word via ``str.title()``).
-
-    Raises:
-        ValueError: If *case* is not one of the valid options.
-    """
-    if case not in _VALID_CASES:
-        raise ValueError(
-            f"Invalid case '{case}'. Must be one of: {', '.join(sorted(_VALID_CASES))}"
-        )
-
-    result = dataframe.copy()
-
-    case_fn_map: dict[str, callable] = {
-        "upper": str.upper,
-        "lower": str.lower,
-        "capitalize": str.title,
-    }
-    fn = case_fn_map[case]
-
-    for col in result.columns:
-        if result[col].dtype.kind == "O":
-            result[col] = result[col].apply(
-                lambda x, _fn=fn: _fn(x) if isinstance(x, str) else x
-            )
-
-    return result
+def _cell_to_text(value: object) -> str:
+    """Convert a table value to text while preserving missing cells as empty."""
+    return "" if pd.isna(value) else str(value)
 
 
 def drop_empty_rows_and_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
