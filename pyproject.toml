@@ -2,12 +2,12 @@
 name = "excel2tex"
 version = "0.1.0"
 description = "Convert CSV and Excel table data into LaTeX table code."
-readme = "inside-docs/specification.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "flet>=0.28.0",
+    "flet==0.85.3",
     "openpyxl>=3.1.5",
-    "pandas>=2.3.0",
+    "pandas>=2.3.0,<3",
 ]
 
 [dependency-groups]
@@ -17,8 +17,12 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.flet.app]
+exclude = [".git", ".pytest_cache", ".venv", "build"]
+path = "src"
 
 [tool.ruff]
 target-version = "py311"
@@ -42,3 +46,6 @@ ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.flet.compile]
+app = true

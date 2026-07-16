@@ -92,6 +92,7 @@ jobs:
           version="${GITHUB_REF_NAME#ver.}"
           uv run flet build "${{ matrix.target }}" \
             --yes \
+            --compile-app \
             --build-version "$version" \
             --product "Excel2TeX" \
             --artifact "Excel2TeX"
