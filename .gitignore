@@ -16,6 +16,7 @@ env/
 
 # uv
 .uv/
+.uv-cache/
 
 # Testing / coverage
 .pytest_cache/
@@ -41,3 +42,4 @@ Thumbs.db
 # Logs / temp
 *.log
 *.tmp
+.tmp/
