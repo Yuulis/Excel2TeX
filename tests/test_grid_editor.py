@@ -1015,8 +1015,8 @@ def test_grid_cells_use_heavy_outer_booktabs_rules() -> None:
     assert body_border.bottom.width == 2
 
 
-def test_grid_toolbar_primary_actions_wrap() -> None:
-    """Primary actions must wrap instead of overflowing into the TeX pane."""
+def test_grid_toolbar_action_groups_stay_in_two_horizontal_rows() -> None:
+    """Edit/Cells and Rows/Columns should remain side by side."""
     from grid_toolbar import build_grid_toolbar
 
     result = build_grid_toolbar(
@@ -1025,13 +1025,18 @@ def test_grid_toolbar_primary_actions_wrap() -> None:
         page_update=lambda: None,
     )
 
-    primary_actions = result.toolbar.controls[0]
-    assert primary_actions.wrap is True
-    assert primary_actions.run_spacing == 4
+    primary_actions, structure_actions = result.toolbar.controls
+    assert primary_actions.wrap is False
+    assert structure_actions.wrap is False
+    assert len(primary_actions.controls) == 2
+    assert len(structure_actions.controls) == 2
+    assert all(group.expand is True for group in primary_actions.controls)
+    assert all(group.expand is True for group in structure_actions.controls)
+    assert result.toolbar.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
 
 
 def test_grid_toolbar_controls_use_consistent_dimensions() -> None:
-    """All toolbar controls should align to a consistent full-screen grid."""
+    """Icon actions are square and the alignment dropdown keeps a usable width."""
     from grid_toolbar import build_grid_toolbar
     from ui_layout import BUTTON_HEIGHT, BUTTON_WIDTH
 
@@ -1041,10 +1046,53 @@ def test_grid_toolbar_controls_use_consistent_dimensions() -> None:
         page_update=lambda: None,
     )
 
-    for row in result.toolbar.controls:
-        for control in row.controls:
-            assert control.width == BUTTON_WIDTH
-            assert control.height == BUTTON_HEIGHT
+    grouped_controls = [
+        control
+        for row in result.toolbar.controls
+        for group in row.controls
+        for control in group.content.controls[1:]
+    ]
+    icon_buttons = [
+        control for control in grouped_controls if isinstance(control, ft.IconButton)
+    ]
+    dropdowns = [
+        control for control in grouped_controls if isinstance(control, ft.Dropdown)
+    ]
+
+    assert len(icon_buttons) == 11
+    assert all(button.width == BUTTON_HEIGHT for button in icon_buttons)
+    assert all(button.height == BUTTON_HEIGHT for button in icon_buttons)
+    assert len(dropdowns) == 1
+    assert dropdowns[0].width == BUTTON_WIDTH
+    assert dropdowns[0].height == BUTTON_HEIGHT
+
+
+def test_grid_toolbar_groups_actions_and_labels_icon_buttons() -> None:
+    """Toolbar actions should be grouped and discoverable through tooltips."""
+    from grid_toolbar import build_grid_toolbar
+
+    result = build_grid_toolbar(
+        get_editor=lambda: None,
+        set_status=lambda _message, _is_error: None,
+        page_update=lambda: None,
+    )
+
+    groups = [group for row in result.toolbar.controls for group in row.controls]
+    labels = [group.content.controls[0].value for group in groups]
+    icon_buttons = [
+        control
+        for group in groups
+        for control in group.content.controls[1:]
+        if isinstance(control, ft.IconButton)
+    ]
+
+    assert labels == ["Edit", "Cells", "Rows", "Columns"]
+    assert all(button.tooltip for button in icon_buttons)
+
+    row_insert_buttons = groups[2].content.controls[1:3]
+    column_insert_buttons = groups[3].content.controls[1:3]
+    assert [button.icon.value for button in row_insert_buttons] == ["+↑", "+↓"]
+    assert [button.icon.value for button in column_insert_buttons] == ["←+", "+→"]
 
 
 # ---------------------------------------------------------------------------

@@ -59,9 +59,9 @@ class ToolbarResult:
     """Return value of ``build_grid_toolbar`` exposing interactive controls."""
 
     toolbar: ft.Column
-    range_mode_button: ft.OutlinedButton
-    undo_button: ft.OutlinedButton
-    redo_button: ft.OutlinedButton
+    range_mode_button: ft.IconButton
+    undo_button: ft.IconButton
+    redo_button: ft.IconButton
     set_alignment_display: Callable[[str], None]
 
 
@@ -120,9 +120,12 @@ def build_grid_toolbar(
 
     # -- range mode -----------------------------------------------------------
 
-    range_mode_button = ft.OutlinedButton(
-        content="Range Select",
+    range_mode_button = ft.IconButton(
         icon=ft.Icons.SELECT_ALL,
+        selected=False,
+        selected_icon=ft.Icons.SELECT_ALL,
+        selected_icon_color=ft.Colors.BLUE_300,
+        tooltip="Toggle range selection",
     )
 
     async def on_toggle_range_mode(_: ft.ControlEvent) -> None:
@@ -133,16 +136,13 @@ def build_grid_toolbar(
             return
         new_mode = not editor.range_mode
         editor.range_mode = new_mode
+        range_mode_button.selected = new_mode
         if new_mode:
-            range_mode_button.style = ft.ButtonStyle(
-                bgcolor=ft.Colors.BLUE_100,
-            )
             set_status(
                 "Range select ON. Click a second cell to define a range.",
                 False,
             )
         else:
-            range_mode_button.style = None
             set_status("Range select OFF. Single-cell selection.", False)
         page_update()
 
@@ -243,14 +243,14 @@ def build_grid_toolbar(
 
     # -- undo / redo ----------------------------------------------------------
 
-    undo_button = ft.OutlinedButton(
-        content="Undo",
+    undo_button = ft.IconButton(
         icon=ft.Icons.UNDO,
+        tooltip="Undo",
         disabled=True,
     )
-    redo_button = ft.OutlinedButton(
-        content="Redo",
+    redo_button = ft.IconButton(
         icon=ft.Icons.REDO,
+        tooltip="Redo",
         disabled=True,
     )
 
@@ -267,70 +267,114 @@ def build_grid_toolbar(
 
     # -- build toolbar layout -------------------------------------------------
 
-    merge_split_row = ft.Row(
-        controls=[
-            undo_button,
-            redo_button,
-            range_mode_button,
-            ft.OutlinedButton(
-                content="Merge cells",
-                icon=ft.Icons.MERGE_TYPE,
-                on_click=on_merge_cells,
-            ),
-            ft.OutlinedButton(
-                content="Split cell",
-                icon=ft.Icons.CALL_SPLIT,
-                on_click=on_split_cell,
-            ),
-            alignment_dropdown,
-        ],
-        spacing=8,
-        wrap=True,
-        run_spacing=4,
+    merge_button = ft.IconButton(
+        icon=ft.Icons.MERGE_TYPE,
+        tooltip="Merge selected cells",
+        on_click=on_merge_cells,
+    )
+    split_button = ft.IconButton(
+        icon=ft.Icons.CALL_SPLIT,
+        tooltip="Split selected cell",
+        on_click=on_split_cell,
+    )
+    insert_row_above_button = ft.IconButton(
+        icon=ft.Text("+↑", size=16, weight=ft.FontWeight.BOLD),
+        tooltip="Insert row above",
+        on_click=on_insert_row_above,
+    )
+    insert_row_below_button = ft.IconButton(
+        icon=ft.Text("+↓", size=16, weight=ft.FontWeight.BOLD),
+        tooltip="Insert row below",
+        on_click=on_insert_row_below,
+    )
+    delete_row_button = ft.IconButton(
+        icon=ft.Icons.DELETE_OUTLINE,
+        tooltip="Delete selected row",
+        on_click=on_delete_row,
+    )
+    insert_col_left_button = ft.IconButton(
+        icon=ft.Text("←+", size=16, weight=ft.FontWeight.BOLD),
+        tooltip="Insert column to the left",
+        on_click=on_insert_col_left,
+    )
+    insert_col_right_button = ft.IconButton(
+        icon=ft.Text("+→", size=16, weight=ft.FontWeight.BOLD),
+        tooltip="Insert column to the right",
+        on_click=on_insert_col_right,
+    )
+    delete_col_button = ft.IconButton(
+        icon=ft.Icons.DELETE_OUTLINE,
+        tooltip="Delete selected column",
+        on_click=on_delete_col,
     )
 
-    insert_delete_row = ft.Row(
+    icon_buttons = [
+        undo_button,
+        redo_button,
+        range_mode_button,
+        merge_button,
+        split_button,
+        insert_row_above_button,
+        insert_row_below_button,
+        delete_row_button,
+        insert_col_left_button,
+        insert_col_right_button,
+        delete_col_button,
+    ]
+    for button in icon_buttons:
+        button.width = BUTTON_HEIGHT
+        button.height = BUTTON_HEIGHT
+
+    alignment_dropdown.width = BUTTON_WIDTH
+    alignment_dropdown.height = BUTTON_HEIGHT
+
+    def _build_group(label: str, controls: list[ft.Control]) -> ft.Container:
+        return ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Text(label, size=12, color=ft.Colors.BLUE_GREY_300),
+                    *controls,
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            border=ft.Border.all(1, ft.Colors.BLUE_GREY_700),
+            border_radius=6,
+            padding=4,
+            expand=True,
+        )
+
+    primary_actions = ft.Row(
         controls=[
-            ft.OutlinedButton(
-                content="Insert row ↑",
-                on_click=on_insert_row_above,
-            ),
-            ft.OutlinedButton(
-                content="Insert row ↓",
-                on_click=on_insert_row_below,
-            ),
-            ft.OutlinedButton(
-                content="Insert col ←",
-                on_click=on_insert_col_left,
-            ),
-            ft.OutlinedButton(
-                content="Insert col →",
-                on_click=on_insert_col_right,
-            ),
-            ft.OutlinedButton(
-                content="Delete row",
-                icon=ft.Icons.DELETE_OUTLINE,
-                on_click=on_delete_row,
-            ),
-            ft.OutlinedButton(
-                content="Delete col",
-                icon=ft.Icons.DELETE_OUTLINE,
-                on_click=on_delete_col,
+            _build_group("Edit", [undo_button, redo_button]),
+            _build_group(
+                "Cells",
+                [range_mode_button, merge_button, split_button, alignment_dropdown],
             ),
         ],
         spacing=8,
-        wrap=True,
-        run_spacing=4,
+        wrap=False,
     )
 
-    for row in (merge_split_row, insert_delete_row):
-        for control in row.controls:
-            control.width = BUTTON_WIDTH
-            control.height = BUTTON_HEIGHT
+    structure_actions = ft.Row(
+        controls=[
+            _build_group(
+                "Rows",
+                [insert_row_above_button, insert_row_below_button, delete_row_button],
+            ),
+            _build_group(
+                "Columns",
+                [insert_col_left_button, insert_col_right_button, delete_col_button],
+            ),
+        ],
+        spacing=8,
+        wrap=False,
+    )
 
     toolbar = ft.Column(
-        controls=[merge_split_row, insert_delete_row],
-        spacing=6,
+        controls=[primary_actions, structure_actions],
+        spacing=8,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
     return ToolbarResult(
