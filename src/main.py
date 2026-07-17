@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -22,7 +21,7 @@ from preprocessing import (
     drop_empty_rows_and_columns,
     transpose_dataframe,
 )
-from table_model import TableGrid, dataframe_to_grid, grid_to_dataframe
+from table_model import TableGrid, clone_grid, dataframe_to_grid, grid_to_dataframe
 from ui_layout import (
     BUTTON_HEIGHT,
     CENTER_PANE_EXPAND,
@@ -186,16 +185,16 @@ async def main(page: ft.Page) -> None:
             scale_factor=scale_factor,
         )
 
-    def render_output() -> None:
+    def render_output(options: ConversionOptions | None = None) -> None:
         grid = state["grid"]
-        options = _build_options()
+        current_options = options or _build_options()
         if grid is not None:
-            output_field.value = grid_to_latex(grid, options)
+            output_field.value = grid_to_latex(grid, current_options)
             return
         dataframe = state["dataframe"]
         if dataframe is None:
             return
-        output_field.value = dataframe_to_latex(dataframe, options)
+        output_field.value = dataframe_to_latex(dataframe, current_options)
 
     # --- history helpers ---
 
@@ -233,8 +232,8 @@ async def main(page: ft.Page) -> None:
             history.push(grid)
             _update_history_buttons()
 
-    def _on_cell_edit(row: int, col: int, text: str) -> None:  # noqa: ARG001
-        """Handle a cell content edit from the grid editor."""
+    def _on_edit_complete(row: int, col: int, text: str) -> None:  # noqa: ARG001
+        """Render output once after the user finishes editing a cell."""
         render_output()
         page.update()
 
@@ -276,7 +275,7 @@ async def main(page: ft.Page) -> None:
             return
         editor = GridEditor(
             grid,
-            on_cell_edit=_on_cell_edit,
+            on_edit_complete=_on_edit_complete,
             on_grid_change=_on_grid_change,
             on_selection_change=_on_selection_change,
             on_before_edit=_on_before_edit,
@@ -377,9 +376,11 @@ async def main(page: ft.Page) -> None:
                 set_status(_SCALE_BOX_INPUT_ERROR, is_error=True)
                 page.update()
                 return
-        if event.control in preview_style_controls and state["grid"] is not None:
-            _refresh_grid_view()
-        render_output()
+        options = _build_options()
+        editor = state.get("editor")
+        if event.control in preview_style_controls and isinstance(editor, GridEditor):
+            editor.update_options(options)
+        render_output(options)
         page.update()
 
     async def open_file_picker(_: ft.ControlEvent) -> None:
@@ -409,7 +410,7 @@ async def main(page: ft.Page) -> None:
             state["original_dataframe"] = dataframe
             state["dataframe"] = dataframe.copy()
             grid = dataframe_to_grid(dataframe)
-            state["original_grid"] = copy.deepcopy(grid)
+            state["original_grid"] = clone_grid(grid)
             state["grid"] = grid
             history.clear()
             state["edit_session_cell"] = None
@@ -496,8 +497,8 @@ async def main(page: ft.Page) -> None:
             set_status("No data loaded. Load a file first.", is_error=True)
             page.update()
             return
-        state["dataframe"] = copy.deepcopy(state["original_dataframe"])
-        state["grid"] = copy.deepcopy(state["original_grid"])
+        state["dataframe"] = state["original_dataframe"].copy(deep=True)
+        state["grid"] = clone_grid(state["original_grid"])
         history.clear()
         state["edit_session_cell"] = None
         _refresh_grid_view()

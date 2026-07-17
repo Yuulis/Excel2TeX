@@ -7,6 +7,7 @@ from table_model import (
     Cell,
     CellAlignment,
     TableGrid,
+    clone_grid,
     dataframe_to_grid,
     grid_to_dataframe,
 )
@@ -109,6 +110,24 @@ def test_grid_to_dataframe_preserves_empty_cells() -> None:
 
     # Assert
     assert dataframe.iloc[0].tolist() == ["value", ""]
+
+
+def test_clone_grid_preserves_metadata_and_is_independent() -> None:
+    grid = _small_grid()
+    grid.set_alignment(0, 0, CellAlignment.RIGHT)
+    grid.merge_cells(0, 0, 2, 2)
+
+    cloned = clone_grid(grid)
+    cloned.set_content(0, 0, "changed")
+    cloned.split_cell(0, 0)
+
+    assert cloned is not grid
+    assert cloned.rows[0][0] is not grid.rows[0][0]
+    assert grid.get_cell(0, 0).content == "a"
+    assert grid.get_cell(0, 0).rowspan == 2
+    assert grid.get_cell(0, 0).colspan == 2
+    assert grid.get_cell(0, 0).alignment == CellAlignment.RIGHT
+    assert grid.get_cell(1, 1).is_covered
 
 
 def test_drop_operations_can_use_current_grid_content() -> None:

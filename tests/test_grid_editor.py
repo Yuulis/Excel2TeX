@@ -296,6 +296,23 @@ class TestGridEditorEdit:
         editor.apply_edit(1, 1, "OK")
         assert grid.get_cell(1, 1).content == "OK"
 
+    def test_edit_complete_callback_runs_on_cell_blur(self) -> None:
+        grid = _simple_grid_2x2()
+        callback_log: list[tuple[int, int, str]] = []
+        editor = GridEditor(
+            grid,
+            on_edit_complete=lambda row, col, text: callback_log.append(
+                (row, col, text)
+            ),
+        )
+        editor.build()
+        editor.apply_edit(1, 0, "Edited")
+        text_field = editor._cell_containers[(1, 0)].content
+
+        text_field.on_blur(SimpleNamespace())
+
+        assert callback_log == [(1, 0, "Edited")]
+
     def test_apply_edit_on_covered_cell_raises(self) -> None:
         grid = _merged_colspan_grid()
         editor = GridEditor(grid)
@@ -1015,6 +1032,31 @@ def test_grid_cells_use_heavy_outer_booktabs_rules() -> None:
     assert body_border.bottom.width == 2
 
 
+def test_update_options_restyles_visible_cells_without_rebuilding() -> None:
+    editor = GridEditor(_simple_grid_2x2())
+    editor.build()
+    original_containers = dict(editor._cell_containers)
+
+    editor.update_options(
+        ConversionOptions(
+            bold_first_row=True,
+            text_alignment="r",
+            border_style="none",
+        )
+    )
+
+    assert editor._cell_containers == original_containers
+    assert all(
+        editor._cell_containers[position] is container
+        for position, container in original_containers.items()
+    )
+    header_field = editor._cell_containers[(0, 0)].content
+    body_field = editor._cell_containers[(1, 1)].content
+    assert header_field.text_style.weight == ft.FontWeight.BOLD
+    assert body_field.text_align == ft.TextAlign.RIGHT
+    assert all(container.border is None for container in original_containers.values())
+
+
 def test_grid_toolbar_action_groups_stay_in_two_horizontal_rows() -> None:
     """Edit/Cells and Rows/Columns should remain side by side."""
     from grid_toolbar import build_grid_toolbar
@@ -1328,3 +1370,54 @@ class TestGridEditorWindowing:
         editor.build()
         # The merged anchor at (0, 0) should be in the visible cells
         assert (0, 0) in editor._cell_containers
+
+    def test_scrolled_window_includes_merge_anchor_above_visible_range(self) -> None:
+        num_rows = VIRTUALIZE_ROW_THRESHOLD + 60
+        rows = [[Cell(content=f"r{r}c{c}") for c in range(2)] for r in range(num_rows)]
+        grid = TableGrid(rows=rows, has_header=True)
+        grid.merge_cells(30, 0, 20, 1)
+        editor = GridEditor(grid)
+        editor.build()
+        event = ft.OnScrollEvent(
+            name="scroll",
+            control=ft.Column(),
+            event_type=ft.ScrollType.UPDATE,
+            pixels=float(40 * CELL_HEIGHT),
+            min_scroll_extent=0.0,
+            max_scroll_extent=float(num_rows * CELL_HEIGHT),
+            viewport_dimension=400.0,
+        )
+
+        editor.handle_scroll(event)
+
+        assert editor._visible_range[0] > 30
+        assert (30, 0) in editor._cell_containers
+
+    def test_scrolling_does_not_scan_rows_before_visible_window(self) -> None:
+        class CountingRows(list[list[Cell]]):
+            access_count = 0
+
+            def __getitem__(self, index: int) -> list[Cell]:
+                self.access_count += 1
+                return super().__getitem__(index)
+
+        num_rows = 5000
+        rows = CountingRows(
+            [[Cell(content=f"r{r}c{c}") for c in range(2)] for r in range(num_rows)]
+        )
+        editor = GridEditor(TableGrid(rows=rows, has_header=True))
+        editor.build()
+        rows.access_count = 0
+        event = ft.OnScrollEvent(
+            name="scroll",
+            control=ft.Column(),
+            event_type=ft.ScrollType.UPDATE,
+            pixels=float((num_rows - 30) * CELL_HEIGHT),
+            min_scroll_extent=0.0,
+            max_scroll_extent=float(num_rows * CELL_HEIGHT),
+            viewport_dimension=400.0,
+        )
+
+        editor.handle_scroll(event)
+
+        assert rows.access_count < 500

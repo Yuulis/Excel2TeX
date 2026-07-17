@@ -67,6 +67,7 @@ DEFAULT_VIEWPORT_HEIGHT = 800.0
 # -- Callback type aliases ---------------------------------------------------
 
 CellEditCallback = Callable[[int, int, str], None]
+EditCompleteCallback = Callable[[int, int, str], None]
 GridChangeCallback = Callable[[], None]
 SelectionChangeCallback = Callable[[int, int], None]
 BeforeEditCallback = Callable[[int, int], None]
@@ -95,6 +96,8 @@ class GridEditor:
         grid: The table grid to render and edit.
         on_cell_edit: Optional callback invoked after a cell content
             edit.  Signature: ``(row, col, new_text) -> None``.
+        on_edit_complete: Optional callback invoked when an edited cell
+            loses focus. Signature: ``(row, col, current_text) -> None``.
         on_grid_change: Optional callback invoked after a structural
             change (merge or split).  The caller should rebuild the
             grid view and re-render LaTeX output.
@@ -112,6 +115,7 @@ class GridEditor:
         self,
         grid: TableGrid,
         on_cell_edit: CellEditCallback | None = None,
+        on_edit_complete: EditCompleteCallback | None = None,
         on_grid_change: GridChangeCallback | None = None,
         on_selection_change: SelectionChangeCallback | None = None,
         on_before_edit: BeforeEditCallback | None = None,
@@ -119,6 +123,7 @@ class GridEditor:
     ) -> None:
         self._grid = grid
         self._on_cell_edit = on_cell_edit
+        self._on_edit_complete = on_edit_complete
         self._on_grid_change = on_grid_change
         self._on_selection_change = on_selection_change
         self._on_before_edit = on_before_edit
@@ -217,6 +222,20 @@ class GridEditor:
         self._stack.controls = [*cell_controls, *selector_controls]
         self._update_selection_highlight()
         return True
+
+    def update_options(self, options: ConversionOptions) -> None:
+        """Update styling on rendered cells without rebuilding the grid."""
+        self._options = options
+        for (row, col), container in self._cell_containers.items():
+            text_field = container.content
+            if not isinstance(text_field, ft.TextField):
+                continue
+            text_field.text_style = ft.TextStyle(
+                color=TEXT_COLOR,
+                weight=self._cell_text_weight(row, col),
+            )
+            text_field.text_align = self._cell_text_alignment(row, col)
+        self._update_selection_highlight()
 
     def apply_edit(self, row: int, col: int, text: str) -> None:
         """Apply a text edit to the grid and invoke the callback.
@@ -478,14 +497,34 @@ class GridEditor:
         """
         first_row, last_row = row_range
         controls: list[ft.Control] = []
-        for r in range(self._grid.num_rows):
-            if r > last_row:
-                break
-            for c in range(self._grid.num_cols):
-                cell = self._grid.get_cell(r, c)
+
+        anchors_above: set[tuple[int, int]] = set()
+        if first_row > 0:
+            for cell in self._grid.rows[first_row]:
+                if (
+                    cell.is_covered
+                    and cell.anchor_row is not None
+                    and cell.anchor_col is not None
+                    and cell.anchor_row < first_row
+                ):
+                    anchors_above.add((cell.anchor_row, cell.anchor_col))
+
+        for r, c in sorted(anchors_above):
+            cell = self._grid.rows[r][c]
+            control = self._build_single_cell(
+                content=cell.content,
+                row=r,
+                col=c,
+                colspan=cell.colspan,
+                rowspan=cell.rowspan,
+                is_header=r == 0 and self._grid.has_header,
+            )
+            self._cell_containers[(r, c)] = control
+            controls.append(control)
+
+        for r in range(first_row, last_row + 1):
+            for c, cell in enumerate(self._grid.rows[r]):
                 if cell.is_covered:
-                    continue
-                if not cell_visible_in_row_range(r, cell.rowspan, first_row, last_row):
                     continue
                 control = self._build_single_cell(
                     content=cell.content,
@@ -626,6 +665,10 @@ class GridEditor:
             if page is not None:
                 page.update()
 
+        def on_blur(_: ft.ControlEvent, r: int = row, c: int = col) -> None:
+            if self._on_edit_complete is not None:
+                self._on_edit_complete(r, c, self._grid.get_cell(r, c).content)
+
         text_field = ft.TextField(
             value=content,
             text_size=FONT_SIZE,
@@ -637,6 +680,7 @@ class GridEditor:
             dense=True,
             on_change=on_change,
             on_focus=on_focus,
+            on_blur=on_blur,
         )
 
         return ft.Container(
