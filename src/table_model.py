@@ -281,6 +281,28 @@ class TableGrid:
                         cell.anchor_col -= 1
 
 
+def clone_grid(grid: TableGrid) -> TableGrid:
+    """Return an independent grid copy without generic deepcopy overhead."""
+    return TableGrid(
+        rows=[
+            [
+                Cell(
+                    content=cell.content,
+                    colspan=cell.colspan,
+                    rowspan=cell.rowspan,
+                    alignment=cell.alignment,
+                    is_covered=cell.is_covered,
+                    anchor_row=cell.anchor_row,
+                    anchor_col=cell.anchor_col,
+                )
+                for cell in row
+            ]
+            for row in grid.rows
+        ],
+        has_header=grid.has_header,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------

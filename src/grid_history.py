@@ -1,6 +1,6 @@
 """Undo/redo history manager for TableGrid snapshots.
 
-Maintains bounded stacks of deep-copied TableGrid snapshots to support
+Maintains bounded stacks of independent TableGrid snapshots to support
 undo and redo of grid mutations.  Each ``push()`` saves a pre-mutation
 snapshot.  Text-edit coalescing is the caller's responsibility (push once
 per edit session, not per keystroke).
@@ -8,9 +8,7 @@ per edit session, not per keystroke).
 
 from __future__ import annotations
 
-import copy
-
-from table_model import TableGrid
+from table_model import TableGrid, clone_grid
 
 # Maximum number of undo snapshots to retain.
 MAX_HISTORY = 50
@@ -51,8 +49,8 @@ class GridHistory:
     # -- mutation ------------------------------------------------------------
 
     def push(self, grid: TableGrid) -> None:
-        """Save a deep-copied pre-mutation snapshot.  Clears redo stack."""
-        snapshot = copy.deepcopy(grid)
+        """Save an independent pre-mutation snapshot. Clears redo stack."""
+        snapshot = clone_grid(grid)
         self._undo_stack.append(snapshot)
         if len(self._undo_stack) > self._max_depth:
             self._undo_stack.pop(0)
@@ -70,7 +68,7 @@ class GridHistory:
         """
         if not self._undo_stack:
             return None
-        self._redo_stack.append(copy.deepcopy(current))
+        self._redo_stack.append(clone_grid(current))
         return self._undo_stack.pop()
 
     def redo(self, current: TableGrid) -> TableGrid | None:
@@ -80,7 +78,7 @@ class GridHistory:
         """
         if not self._redo_stack:
             return None
-        self._undo_stack.append(copy.deepcopy(current))
+        self._undo_stack.append(clone_grid(current))
         return self._redo_stack.pop()
 
     def clear(self) -> None:

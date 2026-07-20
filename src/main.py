@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import copy
+import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -21,10 +21,9 @@ from preprocessing import (
     drop_empty_rows_and_columns,
     transpose_dataframe,
 )
-from table_model import TableGrid, dataframe_to_grid, grid_to_dataframe
+from table_model import TableGrid, clone_grid, dataframe_to_grid, grid_to_dataframe
 from ui_layout import (
     BUTTON_HEIGHT,
-    BUTTON_WIDTH,
     CENTER_PANE_EXPAND,
     LEFT_PANE_EXPAND,
     PAGE_PADDING,
@@ -35,6 +34,7 @@ from ui_layout import (
     PANEL_PADDING,
     PANEL_SPACING,
     RIGHT_PANE_EXPAND,
+    build_settings_panel,
 )
 
 if TYPE_CHECKING:
@@ -65,10 +65,9 @@ async def main(page: ft.Page) -> None:
 
     history = GridHistory()
 
-    # --- shared widgets ---
-
-    selected_file_text = ft.Text("No file selected")
+    selected_file_text = ft.Text("No file selected", text_align=ft.TextAlign.CENTER)
     status_text = ft.Text("Select a CSV or XLSX file to generate LaTeX.")
+    loading_progress = ft.ProgressBar(visible=False)
     output_field = ft.TextField(
         value="",
         read_only=True,
@@ -89,8 +88,8 @@ async def main(page: ft.Page) -> None:
 
     # --- Additional Info controls ---
 
-    caption_field = ft.TextField(label="Caption", dense=True)
-    label_field = ft.TextField(label="Label", dense=True)
+    caption_field = ft.TextField(label="Caption", dense=True, expand=True)
+    label_field = ft.TextField(label="Label", dense=True, expand=True)
 
     # --- Structure & Type controls ---
 
@@ -104,8 +103,8 @@ async def main(page: ft.Page) -> None:
         ],
         dense=True,
     )
-    full_document_checkbox = ft.Checkbox(label="Full document (MWE)", value=False)
-    float_position_switch = ft.Switch(label="Float position [htbp]", value=True)
+    full_document_switch = ft.Switch(label="Full document", value=False, expand=True)
+    float_position_switch = ft.Switch(label="Float position", value=True, expand=True)
     scale_box_field = ft.TextField(
         label="Scale box",
         hint_text="e.g. 0.85 (blank = off)",
@@ -127,8 +126,10 @@ async def main(page: ft.Page) -> None:
         ],
         dense=True,
     )
-    bold_first_row_checkbox = ft.Checkbox(label="Bold first row", value=False)
-    bold_first_column_checkbox = ft.Checkbox(label="Bold first column", value=False)
+    bold_first_row_switch = ft.Switch(label="Bold first row", value=False, expand=True)
+    bold_first_column_switch = ft.Switch(
+        label="Bold first column", value=False, expand=True
+    )
     table_alignment_dropdown = ft.Dropdown(
         label="Table alignment",
         value="center",
@@ -138,6 +139,7 @@ async def main(page: ft.Page) -> None:
             ft.dropdown.Option("right"),
         ],
         dense=True,
+        expand=True,
     )
     text_alignment_dropdown = ft.Dropdown(
         label="Text alignment",
@@ -148,6 +150,7 @@ async def main(page: ft.Page) -> None:
             ft.dropdown.Option("r"),
         ],
         dense=True,
+        expand=True,
     )
     escape_switch = ft.Switch(label="Escape special chars", value=True)
 
@@ -171,27 +174,27 @@ async def main(page: ft.Page) -> None:
             label=label_field.value or None,
             text_alignment=text_alignment_dropdown.value or "c",
             table_alignment=table_alignment_dropdown.value or "center",
-            bold_first_row=bool(bold_first_row_checkbox.value),
-            bold_first_column=bool(bold_first_column_checkbox.value),
+            bold_first_row=bool(bold_first_row_switch.value),
+            bold_first_column=bool(bold_first_column_switch.value),
             use_float_position=bool(float_position_switch.value),
             float_position="htbp",
             escape=bool(escape_switch.value),
             border_style=border_style_dropdown.value or "all",
             table_type=table_type,
-            full_document=bool(full_document_checkbox.value),
+            full_document=bool(full_document_switch.value),
             scale_factor=scale_factor,
         )
 
-    def render_output() -> None:
+    def render_output(options: ConversionOptions | None = None) -> None:
         grid = state["grid"]
-        options = _build_options()
+        current_options = options or _build_options()
         if grid is not None:
-            output_field.value = grid_to_latex(grid, options)
+            output_field.value = grid_to_latex(grid, current_options)
             return
         dataframe = state["dataframe"]
         if dataframe is None:
             return
-        output_field.value = dataframe_to_latex(dataframe, options)
+        output_field.value = dataframe_to_latex(dataframe, current_options)
 
     # --- history helpers ---
 
@@ -229,8 +232,8 @@ async def main(page: ft.Page) -> None:
             history.push(grid)
             _update_history_buttons()
 
-    def _on_cell_edit(row: int, col: int, text: str) -> None:  # noqa: ARG001
-        """Handle a cell content edit from the grid editor."""
+    def _on_edit_complete(row: int, col: int, text: str) -> None:  # noqa: ARG001
+        """Render output once after the user finishes editing a cell."""
         render_output()
         page.update()
 
@@ -272,7 +275,7 @@ async def main(page: ft.Page) -> None:
             return
         editor = GridEditor(
             grid,
-            on_cell_edit=_on_cell_edit,
+            on_edit_complete=_on_edit_complete,
             on_grid_change=_on_grid_change,
             on_selection_change=_on_selection_change,
             on_before_edit=_on_before_edit,
@@ -282,7 +285,7 @@ async def main(page: ft.Page) -> None:
         grid_preview_content.content = editor.build()
         # Reset range mode visuals (new editor starts with range_mode=False).
         if range_mode_button is not None:
-            range_mode_button.style = None
+            range_mode_button.selected = False
 
     # --- undo / redo handlers ---
 
@@ -373,9 +376,11 @@ async def main(page: ft.Page) -> None:
                 set_status(_SCALE_BOX_INPUT_ERROR, is_error=True)
                 page.update()
                 return
-        if event.control in preview_style_controls and state["grid"] is not None:
-            _refresh_grid_view()
-        render_output()
+        options = _build_options()
+        editor = state.get("editor")
+        if event.control in preview_style_controls and isinstance(editor, GridEditor):
+            editor.update_options(options)
+        render_output(options)
         page.update()
 
     async def open_file_picker(_: ft.ControlEvent) -> None:
@@ -395,12 +400,17 @@ async def main(page: ft.Page) -> None:
             page.update()
             return
 
+        selected_file_text.value = selected_file.name
+        loading_progress.visible = True
+        set_status(f"Loading {selected_file.name}...")
+        page.update()
+
         try:
-            dataframe = read_table_file(selected_file.path)
+            dataframe = await asyncio.to_thread(read_table_file, selected_file.path)
             state["original_dataframe"] = dataframe
             state["dataframe"] = dataframe.copy()
             grid = dataframe_to_grid(dataframe)
-            state["original_grid"] = copy.deepcopy(grid)
+            state["original_grid"] = clone_grid(grid)
             state["grid"] = grid
             history.clear()
             state["edit_session_cell"] = None
@@ -414,14 +424,12 @@ async def main(page: ft.Page) -> None:
             state["grid"] = None
             state["original_grid"] = None
             _refresh_grid_view()
-            selected_file_text.value = selected_file.name
             set_status(f"Could not convert file: {error}", is_error=True)
+        else:
+            set_status("LaTeX code generated.")
+        finally:
+            loading_progress.visible = False
             page.update()
-            return
-
-        selected_file_text.value = selected_file.name
-        set_status("LaTeX code generated.")
-        page.update()
 
     async def copy_output(_: ft.ControlEvent) -> None:
         if not output_field.value:
@@ -489,8 +497,8 @@ async def main(page: ft.Page) -> None:
             set_status("No data loaded. Load a file first.", is_error=True)
             page.update()
             return
-        state["dataframe"] = copy.deepcopy(state["original_dataframe"])
-        state["grid"] = copy.deepcopy(state["original_grid"])
+        state["dataframe"] = state["original_dataframe"].copy(deep=True)
+        state["grid"] = clone_grid(state["original_grid"])
         history.clear()
         state["edit_session_cell"] = None
         _refresh_grid_view()
@@ -510,19 +518,19 @@ async def main(page: ft.Page) -> None:
         label_field,
         table_type_dropdown,
         scale_box_field,
-        full_document_checkbox,
+        full_document_switch,
         float_position_switch,
         border_style_dropdown,
-        bold_first_row_checkbox,
-        bold_first_column_checkbox,
+        bold_first_row_switch,
+        bold_first_column_switch,
         table_alignment_dropdown,
         text_alignment_dropdown,
         escape_switch,
     ]
     preview_style_controls = [
         border_style_dropdown,
-        bold_first_row_checkbox,
-        bold_first_column_checkbox,
+        bold_first_row_switch,
+        bold_first_column_switch,
         text_alignment_dropdown,
     ]
     for control in all_option_controls:
@@ -548,23 +556,28 @@ async def main(page: ft.Page) -> None:
     redo_button = toolbar_result.redo_button
     set_alignment_display = toolbar_result.set_alignment_display
 
-    # --- layout ---
-
-    upload_zone = ft.Container(
+    input_panel = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Icon(ft.Icons.UPLOAD_FILE, size=36),
-                ft.Text("CSV / XLSX"),
-                ft.FilledButton(
-                    content="Select file",
-                    icon=ft.Icons.FOLDER_OPEN,
-                    on_click=open_file_picker,
-                    width=BUTTON_WIDTH,
-                    height=BUTTON_HEIGHT,
+                ft.Text("Input", theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
+                ft.Column(
+                    controls=[
+                        ft.Icon(ft.Icons.UPLOAD_FILE, size=36),
+                        ft.Text("CSV / XLSX", text_align=ft.TextAlign.CENTER),
+                        ft.FilledButton(
+                            content="Select file",
+                            icon=ft.Icons.FOLDER_OPEN,
+                            on_click=open_file_picker,
+                            height=BUTTON_HEIGHT,
+                        ),
+                        selected_file_text,
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    spacing=PANEL_SPACING,
                 ),
-                selected_file_text,
+                loading_progress,
             ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             spacing=PANEL_SPACING,
         ),
         border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
@@ -573,122 +586,87 @@ async def main(page: ft.Page) -> None:
         on_click=open_file_picker,
     )
 
-    operation_buttons = ft.Row(
+    operation_buttons = ft.Column(
         controls=[
-            ft.OutlinedButton(
-                content="Transpose",
-                on_click=on_transpose,
-                width=BUTTON_WIDTH,
-                height=BUTTON_HEIGHT,
+            ft.Row(
+                controls=[
+                    ft.OutlinedButton(
+                        content="Transpose",
+                        on_click=on_transpose,
+                        height=BUTTON_HEIGHT,
+                        expand=True,
+                    ),
+                    ft.OutlinedButton(
+                        content="Drop empty",
+                        on_click=on_drop_empty,
+                        height=BUTTON_HEIGHT,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
             ),
-            ft.OutlinedButton(
-                content="Drop empty",
-                on_click=on_drop_empty,
-                width=BUTTON_WIDTH,
-                height=BUTTON_HEIGHT,
-            ),
-            ft.OutlinedButton(
-                content="Drop duplicates",
-                on_click=on_drop_duplicates,
-                width=BUTTON_WIDTH,
-                height=BUTTON_HEIGHT,
-            ),
-            ft.OutlinedButton(
-                content="Reset",
-                on_click=on_reset,
-                width=BUTTON_WIDTH,
-                height=BUTTON_HEIGHT,
+            ft.Row(
+                controls=[
+                    ft.OutlinedButton(
+                        content="Drop duplicates",
+                        on_click=on_drop_duplicates,
+                        height=BUTTON_HEIGHT,
+                        expand=True,
+                    ),
+                    ft.OutlinedButton(
+                        content="Reset",
+                        on_click=on_reset,
+                        height=BUTTON_HEIGHT,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
             ),
         ],
-        wrap=True,
         spacing=8,
-        run_spacing=8,
-        alignment=ft.MainAxisAlignment.CENTER,
     )
 
-    data_source_panel = ft.Container(
-        content=ft.Column(
-            controls=[
-                ft.Text(
-                    "Data Source & Operations",
-                    theme_style=ft.TextThemeStyle.TITLE_SMALL,
-                ),
-                upload_zone,
-                operation_buttons,
-            ],
-            spacing=PANEL_SPACING,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        ),
-        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
-        border_radius=PANEL_BORDER_RADIUS,
-        padding=PANEL_PADDING,
+    operations_panel = build_settings_panel("Operations", [operation_buttons])
+
+    additional_info_panel = build_settings_panel(
+        "Additional Info",
+        [caption_field, label_field],
     )
 
-    additional_info_panel = ft.Container(
-        content=ft.Column(
-            controls=[
-                ft.Text("Additional Info", theme_style=ft.TextThemeStyle.TITLE_SMALL),
-                caption_field,
-                label_field,
-            ],
-            spacing=PANEL_SPACING,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        ),
-        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
-        border_radius=PANEL_BORDER_RADIUS,
-        padding=PANEL_PADDING,
+    structure_type_panel = build_settings_panel(
+        "Structure & Type",
+        [
+            table_type_dropdown,
+            scale_box_field,
+            ft.Row(controls=[full_document_switch, float_position_switch], spacing=8),
+        ],
     )
 
-    structure_type_panel = ft.Container(
-        content=ft.Column(
-            controls=[
-                ft.Text("Structure & Type", theme_style=ft.TextThemeStyle.TITLE_SMALL),
-                table_type_dropdown,
-                scale_box_field,
-                full_document_checkbox,
-                float_position_switch,
-            ],
-            spacing=PANEL_SPACING,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        ),
-        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
-        border_radius=PANEL_BORDER_RADIUS,
-        padding=PANEL_PADDING,
+    style_design_panel = build_settings_panel(
+        "Style & Design",
+        [
+            border_style_dropdown,
+            ft.Row(
+                controls=[table_alignment_dropdown, text_alignment_dropdown], spacing=8
+            ),
+            bold_first_row_switch,
+            bold_first_column_switch,
+            escape_switch,
+        ],
     )
-
-    style_design_panel = ft.Container(
-        content=ft.Column(
-            controls=[
-                ft.Text("Style & Design", theme_style=ft.TextThemeStyle.TITLE_SMALL),
-                border_style_dropdown,
-                bold_first_row_checkbox,
-                bold_first_column_checkbox,
-                table_alignment_dropdown,
-                text_alignment_dropdown,
-                escape_switch,
-            ],
-            spacing=PANEL_SPACING,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        ),
-        border=ft.Border.all(PANEL_BORDER_WIDTH, ft.Colors.BLUE_GREY_200),
-        border_radius=PANEL_BORDER_RADIUS,
-        padding=PANEL_PADDING,
-    )
-
-    # --- 3-pane layout: left (options), center (table preview), right (TeX) ---
 
     left_pane = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Text("Input", theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
-                data_source_panel,
+                input_panel,
+                operations_panel,
                 additional_info_panel,
                 structure_type_panel,
                 style_design_panel,
-                status_text,
             ],
             spacing=PANE_SPACING,
             scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
         expand=LEFT_PANE_EXPAND,
         padding=PANE_PADDING,
@@ -741,20 +719,18 @@ async def main(page: ft.Page) -> None:
                             content="Copy",
                             icon=ft.Icons.CONTENT_COPY,
                             on_click=copy_output,
-                            width=BUTTON_WIDTH,
                             height=BUTTON_HEIGHT,
+                            expand=True,
                         ),
                         ft.FilledButton(
                             content="Download (.tex)",
                             icon=ft.Icons.DOWNLOAD,
                             on_click=download_output,
-                            width=BUTTON_WIDTH,
                             height=BUTTON_HEIGHT,
+                            expand=True,
                         ),
                     ],
-                    wrap=True,
                     spacing=8,
-                    run_spacing=8,
                 ),
                 output_field,
             ],
@@ -765,11 +741,20 @@ async def main(page: ft.Page) -> None:
         padding=PANE_PADDING,
     )
 
+    log_area = ft.Container(content=status_text, padding=PANE_PADDING)
+
     page.add(
-        ft.Row(
-            controls=[left_pane, center_pane, right_pane],
+        ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[left_pane, center_pane, right_pane],
+                    expand=True,
+                    vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                ),
+                log_area,
+            ],
             expand=True,
-            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+            spacing=PANE_SPACING,
         )
     )
 
